@@ -28,24 +28,16 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   overflow: auto;
 }
 
-.open-row { display: flex; gap: 6px; padding: 10px; border-bottom: 1px solid #1e293b; }
-.open-row input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: 4px;
-  border: 1px solid #334155;
-  background: #0b1020;
-  color: #dbeafe;
-  font: inherit;
-}
+.open-row { display: flex; padding: 10px; border-bottom: 1px solid #1e293b; }
 .open-row button {
-  padding: 6px 12px;
+  flex: 1;
+  padding: 8px 12px;
   border-radius: 4px;
   border: 1px solid #2563eb;
   background: #1d4ed8;
   color: #fff;
   cursor: pointer;
+  font: inherit;
 }
 .open-row button:disabled { opacity: 0.5; cursor: default; }
 

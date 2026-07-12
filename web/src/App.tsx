@@ -8,6 +8,15 @@ type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
 type NsNode = { name: string; children: Map<string, NsNode>; types: DesignableType[] }
 
+// The Photino native-shell bridge (present only inside the desktop webview, not a plain browser).
+type PhotinoBridge = {
+  external?: {
+    sendMessage?: (msg: string) => void
+    receiveMessage?: (cb: (msg: string) => void) => void
+  }
+}
+const photino = () => (window as unknown as PhotinoBridge).external
+
 const KIND_ORDER = ['Model', 'Service', 'LooselyCoupledService', 'Interface', 'Other']
 
 // Build a nested namespace tree: "A.B.C" becomes folders A > B > C, with types at their leaf.
@@ -67,10 +76,23 @@ function TypeRow({ t, depth }: { t: DesignableType; depth: number }) {
 export default function App() {
   const conn = useRef<signalR.HubConnection | null>(null)
   const [connected, setConnected] = useState(false)
-  const [path, setPath] = useState('')
   const [project, setProject] = useState<ProjectModel | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  const openPath = async (p: string) => {
+    if (!conn.current || !p.trim()) return
+    setBusy(true)
+    setError('')
+    setProject(null)
+    try {
+      setProject(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   useEffect(() => {
     const c = new signalR.HubConnectionBuilder().withUrl('/hub').build()
@@ -78,24 +100,19 @@ export default function App() {
     c.start()
       .then(() => setConnected(true))
       .catch((e) => setError('connect: ' + e))
+
+    // Native "Browse" result from the Photino host: "project:<path>".
+    photino()?.receiveMessage?.((msg) => {
+      if (msg.startsWith('project:')) {
+        void openPath(msg.slice('project:'.length))
+      }
+    })
+
     return () => {
       void c.stop()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  const open = async () => {
-    if (!conn.current || !path.trim()) return
-    setBusy(true)
-    setError('')
-    setProject(null)
-    try {
-      setProject(await conn.current.invoke<ProjectModel>('OpenProject', path.trim()))
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
 
   const root = useMemo(() => buildTree(project?.types ?? []), [project])
   const topFolders = [...root.children.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -110,15 +127,12 @@ export default function App() {
       <div className="body">
         <aside className="sidebar">
           <div className="open-row">
-            <input
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && open()}
-              placeholder="path\to\Project.csproj"
-              spellCheck={false}
-            />
-            <button onClick={open} disabled={!connected || busy}>
-              {busy ? '…' : 'Open'}
+            <button
+              className="open-project"
+              onClick={() => photino()?.sendMessage?.('pickProject')}
+              disabled={!connected || busy}
+            >
+              {busy ? 'Opening…' : 'Open Project'}
             </button>
           </div>
           {error && <div className="error">{error}</div>}

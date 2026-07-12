@@ -46,15 +46,30 @@ internal static class Program
                      .Features.Get<IServerAddressesFeature>()!.Addresses.First();
 
         // ── Shell: a Photino window on the served SPA. ──
-        new PhotinoWindow()
+        var window = new PhotinoWindow()
             .SetTitle("SimulaSharp.Studio")
             .SetUseOsDefaultSize(false)
             .SetSize(1400, 900)
             .Center()
-            .Load(new Uri(url))
-            .WaitForClose();                               // blocks the main thread until the window closes
+            .RegisterWebMessageReceivedHandler(OnWebMessage)
+            .Load(new Uri(url));
+        window.WaitForClose();                             // blocks the main thread until the window closes
 
         app.StopAsync().GetAwaiter().GetResult();
+    }
+
+    /// <summary>Bridges native-shell requests from the SPA. Today: a native "open .csproj" file dialog whose result
+    /// is posted back to the SPA as <c>project:&lt;path&gt;</c>.</summary>
+    private static void OnWebMessage(object? sender, string message)
+    {
+        if (sender is not PhotinoWindow w) return;
+        if (message == "pickProject")
+        {
+            var files = w.ShowOpenFile("Open a C# project", multiSelect: false,
+                filters: [("C# project", ["csproj"])]);
+            if (files.Length > 0)
+                w.SendWebMessage("project:" + files[0]);
+        }
     }
 }
 
