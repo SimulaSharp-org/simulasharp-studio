@@ -1,10 +1,27 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { ReactFlow, Background, Controls, type NodeProps } from '@xyflow/react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  Handle,
+  Position,
+  MarkerType,
+  type NodeProps,
+  type Node,
+  type Edge,
+} from '@xyflow/react'
 import * as signalR from '@microsoft/signalr'
 import '@xyflow/react/dist/style.css'
 
 type MemberRow = { name: string; type: string | null; facets: string[] }
-type DesignableType = { namespace: string; name: string; kind: string; members: MemberRow[] }
+type Association = { kind: string; name: string; target: string }
+type DesignableType = {
+  namespace: string
+  name: string
+  kind: string
+  members: MemberRow[]
+  associations: Association[]
+}
 type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
 type NsNode = { name: string; children: Map<string, NsNode>; types: DesignableType[] }
@@ -19,7 +36,30 @@ type PhotinoBridge = {
 const photino = () => (window as unknown as PhotinoBridge).external
 
 const KIND_ORDER = ['Model', 'Service', 'LooselyCoupledService', 'Interface', 'Other']
-const key = (t: DesignableType) => t.namespace + '.' + t.name
+const key = (t: DesignableType) => (t.namespace ? t.namespace + '.' + t.name : t.name)
+
+// Association layout: each kind sits on one side of the selected type, and each edge is coloured by kind.
+const SIDES = ['top', 'right', 'bottom', 'left'] as const
+type Side = (typeof SIDES)[number]
+const SIDE_OF: Record<string, Side> = {
+  Inheritance: 'top',
+  Reference: 'right',
+  ServiceDep: 'left',
+  Containment: 'bottom',
+}
+const OPPOSITE: Record<Side, Side> = { top: 'bottom', bottom: 'top', left: 'right', right: 'left' }
+const HANDLE_POS: Record<Side, Position> = {
+  top: Position.Top,
+  right: Position.Right,
+  bottom: Position.Bottom,
+  left: Position.Left,
+}
+const EDGE_COLOR: Record<string, string> = {
+  Inheritance: '#94a3b8',
+  Reference: '#38bdf8',
+  ServiceDep: '#c084fc',
+  Containment: '#34d399',
+}
 
 // The attributes a member may carry, gated by its owning type's kind. A member is defined by at
 // least one of these. Interfaces are the odd one out — a member is a Property XOR a Method, so its
@@ -229,6 +269,35 @@ type ClassNodeData = {
   onDelete: (name: string) => void
 }
 
+// Hidden connection points on all four sides (source + target each), so association edges can attach to
+// a custom node. We never drag-connect — placement of the neighbour conveys the association side.
+function NodeHandles() {
+  return (
+    <>
+      {SIDES.map((s) => (
+        <Fragment key={s}>
+          <Handle id={s + '-s'} type="source" position={HANDLE_POS[s]} className="nh" isConnectable={false} />
+          <Handle id={s + '-t'} type="target" position={HANDLE_POS[s]} className="nh" isConnectable={false} />
+        </Fragment>
+      ))}
+    </>
+  )
+}
+
+/// A compact neighbour node — an associated type shown as a clickable header (click to make it the focus).
+function TypeChipNode({ data }: NodeProps) {
+  const t = data.t as DesignableType
+  return (
+    <div className="type-chip">
+      <NodeHandles />
+      <span className={'badge k-' + t.kind} title={t.kind}>
+        {shortKind(t.kind)}
+      </span>
+      <span className="chip-name">{t.name}</span>
+    </div>
+  )
+}
+
 function ClassNode({ data }: NodeProps) {
   const { t, onAdd, onUpdate, onDelete } = data as unknown as ClassNodeData
   const [editing, setEditing] = useState<string | null>(null) // member name whose form is open
@@ -237,6 +306,7 @@ function ClassNode({ data }: NodeProps) {
 
   return (
     <div className="class-node">
+      <NodeHandles />
       <div className="class-head">
         <span className={'badge k-' + t.kind} title={t.kind}>
           {shortKind(t.kind)}
@@ -313,7 +383,75 @@ function ClassNode({ data }: NodeProps) {
   )
 }
 
-const nodeTypes = { classNode: ClassNode }
+const nodeTypes = { classNode: ClassNode, typeChip: TypeChipNode }
+
+// Builds the focus graph: the selected type as an editable class box at the origin, its resolvable
+// associations as neighbour chips placed by side, and one coloured, labelled edge per association.
+function buildGraph(
+  sel: DesignableType,
+  byKey: Map<string, DesignableType>,
+  handlers: Omit<ClassNodeData, 't'>,
+): { nodes: Node[]; edges: Edge[] } {
+  const selKey = key(sel)
+  const nodes: Node[] = [
+    { id: selKey, type: 'classNode', position: { x: 0, y: 0 }, data: { t: sel, ...handlers } as unknown as Record<string, unknown> },
+  ]
+  const edges: Edge[] = []
+
+  // Resolve edges to targets that exist as nodes; each unique target gets one chip, placed by the side
+  // of its first association (all its edges still connect to that one chip).
+  const nodeSide = new Map<string, Side>()
+  const resolved: Association[] = []
+  for (const a of sel.associations) {
+    const side = SIDE_OF[a.kind]
+    if (!side || a.target === selKey || !byKey.has(a.target)) continue
+    if (!nodeSide.has(a.target)) nodeSide.set(a.target, side)
+    resolved.push(a)
+  }
+
+  const bySide: Record<Side, string[]> = { top: [], right: [], bottom: [], left: [] }
+  for (const [tk, side] of nodeSide) bySide[side].push(tk)
+  for (const side of SIDES)
+    bySide[side].forEach((tk, i) => {
+      nodes.push({ id: tk, type: 'typeChip', position: placeSide(side, i, bySide[side].length), data: { t: byKey.get(tk)! } })
+    })
+
+  resolved.forEach((a, i) => {
+    const side = nodeSide.get(a.target)!
+    const color = EDGE_COLOR[a.kind]
+    edges.push({
+      id: 'e' + i,
+      source: selKey,
+      target: a.target,
+      sourceHandle: side + '-s',
+      targetHandle: OPPOSITE[side] + '-t',
+      label: a.name || undefined,
+      style: { stroke: color, strokeWidth: 1.5 },
+      markerEnd: { type: MarkerType.ArrowClosed, color },
+      labelStyle: { fill: '#dbeafe', fontSize: 11 },
+      labelBgStyle: { fill: '#0e1526' },
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 3,
+    })
+  })
+
+  return { nodes, edges }
+}
+
+function placeSide(side: Side, i: number, n: number) {
+  const spreadX = (i - (n - 1) / 2) * 250
+  const spreadY = (i - (n - 1) / 2) * 110
+  switch (side) {
+    case 'top':
+      return { x: spreadX, y: -170 }
+    case 'bottom':
+      return { x: spreadX, y: 340 }
+    case 'right':
+      return { x: 370, y: spreadY }
+    case 'left':
+      return { x: -270, y: spreadY }
+  }
+}
 
 // ── App ────────────────────────────────────────────────────────────────────────
 
@@ -432,16 +570,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [journal, redo])
 
-  const nodes = selected
-    ? [
-        {
-          id: selectedKey!,
-          type: 'classNode',
-          position: { x: 0, y: 0 },
-          data: { t: selected, onAdd, onUpdate, onDelete } as unknown as Record<string, unknown>,
-        },
-      ]
-    : []
+  const byKey = useMemo(() => new Map((working?.types ?? []).map((t) => [key(t), t])), [working])
+  const { nodes, edges } = selected
+    ? buildGraph(selected, byKey, { onAdd, onUpdate, onDelete })
+    : { nodes: [], edges: [] }
 
   return (
     <div className="app">
@@ -497,9 +629,11 @@ export default function App() {
           <ReactFlow
             key={(selectedKey ?? 'empty') + ':' + rev}
             defaultNodes={nodes}
+            defaultEdges={edges}
             nodeTypes={nodeTypes}
+            onNodeClick={(_, node) => node.id !== selectedKey && setSelectedKey(node.id)}
             fitView
-            fitViewOptions={{ minZoom: 0.5, maxZoom: 1.2 }}
+            fitViewOptions={{ minZoom: 0.4, maxZoom: 1.2 }}
             colorMode="dark"
             nodesConnectable={false}
           >

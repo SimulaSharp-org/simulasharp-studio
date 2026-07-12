@@ -9,14 +9,25 @@ namespace SimulaSharp.Studio.Core;
 public sealed record MemberRow(string Name, string? Type, IReadOnlyList<string> Facets);
 
 /// <summary>
-/// A designable type in an opened project's read-only IR: its namespace/name, its classification, and its designable
-/// member rows. Association edges (containment / references / service-deps / inheritance) are added in a later step.
+/// A directed association from one designable type to another. <paramref name="Kind"/> is
+/// <c>Inheritance</c> (base class / implemented interface), <c>Containment</c> (<c>[Contains&lt;T&gt;]</c>),
+/// <c>Reference</c> (<c>[References&lt;T&gt;]</c>) or <c>ServiceDep</c> (a <c>[ServiceRef]</c> member).
+/// <paramref name="Name"/> is the association's declared name where it has one (the container / reference /
+/// member name; empty for inheritance). <paramref name="Target"/> is the target type's key
+/// (<c>Namespace.Name</c>), which the UI resolves to a node.
+/// </summary>
+public sealed record Association(string Kind, string Name, string Target);
+
+/// <summary>
+/// A designable type in an opened project's read-only IR: its namespace/name, its classification, its designable
+/// member rows, and its outgoing <see cref="Association"/> edges (inheritance / containment / references / service-deps).
 /// </summary>
 public sealed record DesignableType(
     string Namespace,
     string Name,
     string Kind,
-    IReadOnlyList<MemberRow> Members);
+    IReadOnlyList<MemberRow> Members,
+    IReadOnlyList<Association> Associations);
 
 /// <summary>The read-only IR of an opened project: its name, path, and declared designable types.</summary>
 public sealed record ProjectModel(string Name, string Path, IReadOnlyList<DesignableType> Types);

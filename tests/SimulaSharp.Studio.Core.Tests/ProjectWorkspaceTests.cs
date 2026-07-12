@@ -34,6 +34,7 @@ public sealed class ProjectWorkspaceTests
         var battery = model.Types.FirstOrDefault(t => t.Name == "Battery");
         var env = model.Types.FirstOrDefault(t => t.Name == "Environment");
         var ipc = model.Types.FirstOrDefault(t => t.Name == "IPowerConsumer");
+        var heater = model.Types.FirstOrDefault(t => t.Name == "Heater");
 
         var vbus = eps?.Members.SingleOrDefault(m => m.Name == "Vbus");
         Assert.Multiple(() =>
@@ -47,6 +48,16 @@ public sealed class ProjectWorkspaceTests
             Assert.That(env?.Kind, Is.EqualTo("Service"));
             Assert.That(env!.Members.Any(m => m.Name == "SunAngle" && m.Facets.Contains("ServiceEvent")), "Env SunAngle event");
             Assert.That(env.Members.Any(m => m.Name == "CurrentAngle" && m.Facets.Contains("ServiceRequest")), "Env CurrentAngle request");
+
+            // Associations: Eps contains Batteries, references Consumers; Heater implements IPowerConsumer.
+            Assert.That(eps!.Associations.Any(a => a is { Kind: "Containment", Name: "Batteries" } && a.Target.EndsWith(".Battery")),
+                "Eps [Contains<Battery>(\"Batteries\")]");
+            Assert.That(eps.Associations.Any(a => a is { Kind: "Reference", Name: "Consumers" } && a.Target.EndsWith(".IPowerConsumer")),
+                "Eps [References<IPowerConsumer>(\"Consumers\")]");
+            Assert.That(heater!.Associations.Any(a => a is { Kind: "Inheritance" } && a.Target.EndsWith(".IPowerConsumer")),
+                "Heater : IPowerConsumer");
+            Assert.That(eps.Associations.Any(a => a is { Kind: "ServiceDep", Name: "Environment" } && a.Target.EndsWith(".Environment")),
+                "Eps [ServiceRef] Environment");
         });
     }
 

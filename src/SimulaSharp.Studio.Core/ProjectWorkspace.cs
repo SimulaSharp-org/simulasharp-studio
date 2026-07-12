@@ -38,7 +38,7 @@ public sealed class ProjectWorkspace
             if (t.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal)) continue;
             if (!IsUserDeclared(t)) continue;   // skip source-generator output (<Type>Ref, companion interfaces, …)
             string ns = t.ContainingNamespace.IsGlobalNamespace ? "" : t.ContainingNamespace.ToDisplayString();
-            types.Add(new DesignableType(ns, t.Name, Classify(t, k), ProjectMembers(t, k)));
+            types.Add(new DesignableType(ns, t.Name, Classify(t, k), ProjectMembers(t, k), ProjectAssociations(t, k)));
         }
 
         return new ProjectModel(project.Name, projectPath, types);
@@ -125,6 +125,55 @@ public sealed class ProjectWorkspace
         if (facets.Count > 0) rows.Add(new MemberRow(member.Name, type.ToDisplayString(TypeFormat), facets));
     }
 
+    // ── Association projection ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Projects a type's outgoing association edges: its base class + implemented interfaces (inheritance),
+    /// its <c>[Contains&lt;T&gt;]</c> / <c>[References&lt;T&gt;]</c> class decorators, and its <c>[ServiceRef]</c>
+    /// members (service-deps). Targets are emitted as type keys; the UI keeps only those that resolve to a node.
+    /// </summary>
+    private static IReadOnlyList<Association> ProjectAssociations(INamedTypeSymbol t, Symbols k)
+    {
+        var edges = new List<Association>();
+
+        // Inheritance: the direct base class (if any beyond object) and directly implemented interfaces.
+        if (t.BaseType is { SpecialType: not SpecialType.System_Object } baseType)
+            edges.Add(new Association("Inheritance", "", TypeKey(baseType)));
+        foreach (var i in t.Interfaces)
+            edges.Add(new Association("Inheritance", "", TypeKey(i)));
+
+        // Containment / references: generic class decorators [Contains<T>("Name")] / [References<T>("Name")].
+        foreach (var attr in t.GetAttributes())
+        {
+            var def = attr.AttributeClass?.OriginalDefinition;
+            string? kind =
+                Eq(def, k.Contains) ? "Containment" :
+                Eq(def, k.References) ? "Reference" : null;
+            if (kind is null || attr.AttributeClass!.TypeArguments.Length < 1) continue;
+            string name = attr.ConstructorArguments.Length >= 1 ? attr.ConstructorArguments[0].Value as string ?? "" : "";
+            edges.Add(new Association(kind, name, TypeKey(attr.AttributeClass.TypeArguments[0])));
+        }
+
+        // Service-deps: [ServiceRef] fields / properties point at another service (or a service interface).
+        foreach (var m in t.GetMembers())
+        {
+            ITypeSymbol? target = m switch
+            {
+                IFieldSymbol f when HasAttr(f, k.ServiceRef) => f.Type,
+                IPropertySymbol p when HasAttr(p, k.ServiceRef) => p.Type,
+                _ => null,
+            };
+            if (target is not null)
+                edges.Add(new Association("ServiceDep", m.Name, TypeKey(target)));
+        }
+
+        return edges;
+    }
+
+    /// <summary>The node key (<c>Namespace.Name</c>) for a type symbol, matching the UI's type identity.</summary>
+    private static string TypeKey(ITypeSymbol t) =>
+        t.ContainingNamespace is { IsGlobalNamespace: false } ns ? ns.ToDisplayString() + "." + t.Name : t.Name;
+
     // ── Symbol helpers ──────────────────────────────────────────────────────────
 
     private static bool IsUserDeclared(INamedTypeSymbol t) =>
@@ -174,5 +223,8 @@ public sealed class ProjectWorkspace
         public readonly INamedTypeSymbol? TriggerKnob = c.GetTypeByMetadataName(Ns + "Attributes.TriggerKnobAttribute");
         public readonly INamedTypeSymbol? ServiceRequest = c.GetTypeByMetadataName(Ns + "Attributes.ServiceRequestAttribute");
         public readonly INamedTypeSymbol? ServiceEvent = c.GetTypeByMetadataName(Ns + "Attributes.ServiceEventAttribute");
+        public readonly INamedTypeSymbol? ServiceRef = c.GetTypeByMetadataName(Ns + "Attributes.ServiceRefAttribute");
+        public readonly INamedTypeSymbol? Contains = c.GetTypeByMetadataName(Ns + "Attributes.ContainsAttribute`1");
+        public readonly INamedTypeSymbol? References = c.GetTypeByMetadataName(Ns + "Attributes.ReferencesAttribute`1");
     }
 }

@@ -139,6 +139,28 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   border-bottom: 1px solid #334155;
 }
 .class-name { overflow: hidden; text-overflow: ellipsis; }
+
+/* association edges attach to hidden handles */
+.nh { opacity: 0; width: 1px; height: 1px; min-width: 0; min-height: 0; border: none; }
+
+/* compact neighbour node (an associated type) */
+.type-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+  padding: 8px 12px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #0e1526;
+  color: #dbeafe;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+.type-chip:hover { border-color: #2563eb; background: #131c30; }
+.chip-name { overflow: hidden; text-overflow: ellipsis; }
 .class-members { padding: 4px 0; }
 .member { display: flex; align-items: center; gap: 8px; padding: 3px 12px; }
 .member:hover { background: #172033; }
