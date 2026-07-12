@@ -2,9 +2,11 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Photino.NET;
+using SimulaSharp.Studio.Core;
 
 namespace SimulaSharp.Studio.Host;
 
@@ -28,7 +30,8 @@ internal static class Program
             WebRootPath = "wwwroot",
         });
         builder.WebHost.UseUrls("http://127.0.0.1:0");
-        builder.Services.AddSignalR();
+        builder.Services.AddSignalR()
+            .AddJsonProtocol(o => o.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase);
 
         var app = builder.Build();
         app.UseDefaultFiles();                             // "/" → /index.html
@@ -60,4 +63,7 @@ internal static class Program
 internal sealed class StudioHub : Hub
 {
     public string Ping() => "backend connected";
+
+    /// <summary>Opens an existing project and returns its designable-type IR for the SPA to render.</summary>
+    public Task<ProjectModel> OpenProject(string path) => new ProjectWorkspace().OpenAsync(path);
 }
