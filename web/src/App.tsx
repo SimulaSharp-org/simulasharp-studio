@@ -6,7 +6,11 @@ import {
   Handle,
   Position,
   MarkerType,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
   type NodeProps,
+  type EdgeProps,
   type Node,
   type Edge,
 } from '@xyflow/react'
@@ -82,6 +86,13 @@ type Action =
   | { op: 'addMember'; typeKey: string; member: MemberRow }
   | { op: 'updateMember'; typeKey: string; name: string; member: MemberRow }
   | { op: 'removeMember'; typeKey: string; name: string }
+  | { op: 'addAssociation'; typeKey: string; assoc: Association }
+  | { op: 'renameAssociation'; typeKey: string; ref: Association; to: string }
+  | { op: 'removeAssociation'; typeKey: string; ref: Association }
+
+// An association is identified by its (kind, target, name) triple — stable enough since identical
+// triples are de-duplicated when the graph is built.
+const sameAssoc = (a: Association, b: Association) => a.kind === b.kind && a.target === b.target && a.name === b.name
 
 function applyToType(t: DesignableType, a: Action): DesignableType {
   switch (a.op) {
@@ -91,6 +102,12 @@ function applyToType(t: DesignableType, a: Action): DesignableType {
       return { ...t, members: t.members.map((m) => (m.name === a.name ? a.member : m)) }
     case 'removeMember':
       return { ...t, members: t.members.filter((m) => m.name !== a.name) }
+    case 'addAssociation':
+      return { ...t, associations: [...t.associations, a.assoc] }
+    case 'renameAssociation':
+      return { ...t, associations: t.associations.map((x) => (sameAssoc(x, a.ref) ? { ...x, name: a.to } : x)) }
+    case 'removeAssociation':
+      return { ...t, associations: t.associations.filter((x) => !sameAssoc(x, a.ref)) }
   }
 }
 
@@ -298,6 +315,139 @@ function TypeChipNode({ data }: NodeProps) {
   )
 }
 
+// ── Association edge (interactive label: rename a named edge, delete any edge) ─────
+
+type AssocEdgeData = {
+  kind: string
+  name: string
+  onRename: (to: string) => void
+  onDelete: () => void
+}
+
+function AssocEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, style, data }: EdgeProps) {
+  const d = data as unknown as AssocEdgeData
+  const [path, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition })
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(d.name)
+  const cancelled = useRef(false)
+  const nameable = d.kind !== 'Inheritance'
+
+  return (
+    <>
+      <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} />
+      <EdgeLabelRenderer>
+        <div
+          className="edge-label"
+          style={{
+            transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            borderColor: EDGE_COLOR[d.kind],
+          }}
+        >
+          {editing ? (
+            <input
+              className="edge-name-edit"
+              autoFocus
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onBlur={() => {
+                setEditing(false)
+                if (!cancelled.current && text.trim() && text.trim() !== d.name) d.onRename(text.trim())
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                else if (e.key === 'Escape') {
+                  cancelled.current = true
+                  ;(e.target as HTMLInputElement).blur()
+                }
+              }}
+            />
+          ) : (
+            <span
+              className={'edge-name' + (nameable ? ' editable' : '')}
+              title={nameable ? 'click to rename' : d.kind}
+              onClick={() => {
+                if (!nameable) return
+                setText(d.name)
+                cancelled.current = false
+                setEditing(true)
+              }}
+            >
+              {d.name || (d.kind === 'Inheritance' ? '▷' : '')}
+            </span>
+          )}
+          <button className="edge-del" title="delete association" onClick={d.onDelete}>
+            ×
+          </button>
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  )
+}
+
+const edgeTypes = { assoc: AssocEdge }
+
+// ── Add-association stub: a "+" on a dangling edge that expands, in place, into a form ─────────────
+
+type AddStubData = {
+  side: Side
+  kind: string
+  candidates: DesignableType[] // valid targets for this kind
+  onAdd: (assoc: Association) => void
+}
+
+function AddStubNode({ data }: NodeProps) {
+  const d = data as unknown as AddStubData
+  const [open, setOpen] = useState(false)
+  const [target, setTarget] = useState('')
+  const [name, setName] = useState('')
+  const named = d.kind !== 'Inheritance'
+  const valid = target !== '' && (!named || name.trim().length > 0)
+
+  if (!open)
+    return (
+      <div className="add-stub">
+        <NodeHandles />
+        <button className="add-stub-btn" title={'add ' + d.kind} onClick={() => setOpen(true)}>
+          +
+        </button>
+      </div>
+    )
+
+  return (
+    <div className="add-stub open">
+      <NodeHandles />
+      <div className="stub-form" onClick={(e) => e.stopPropagation()}>
+        <div className="stub-kind" style={{ color: EDGE_COLOR[d.kind] }}>
+          {d.kind}
+        </div>
+        <select className="stub-target" value={target} onChange={(e) => setTarget(e.target.value)}>
+          <option value="">target…</option>
+          {d.candidates.map((c) => (
+            <option key={key(c)} value={key(c)}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        {named && (
+          <input className="stub-name" placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
+        )}
+        <div className="stub-actions">
+          <button
+            className="mf-save"
+            disabled={!valid}
+            onClick={() => valid && d.onAdd({ kind: d.kind, name: named ? name.trim() : '', target })}
+          >
+            Add
+          </button>
+          <button className="mf-cancel" onClick={() => setOpen(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ClassNode({ data }: NodeProps) {
   const { t, onAdd, onUpdate, onDelete } = data as unknown as ClassNodeData
   const [editing, setEditing] = useState<string | null>(null) // member name whose form is open
@@ -383,18 +533,31 @@ function ClassNode({ data }: NodeProps) {
   )
 }
 
-const nodeTypes = { classNode: ClassNode, typeChip: TypeChipNode }
+const nodeTypes = { classNode: ClassNode, typeChip: TypeChipNode, addStub: AddStubNode }
+
+type GraphHandlers = Omit<ClassNodeData, 't'> & {
+  allTypes: DesignableType[]
+  onAddAssoc: (assoc: Association) => void
+  onRenameAssoc: (ref: Association, to: string) => void
+  onDeleteAssoc: (ref: Association) => void
+}
+
+/// Valid target types for a new association of the given kind (services/interfaces for a service-dep;
+/// any other type otherwise), excluding the type itself.
+function candidatesFor(kind: string, allTypes: DesignableType[], selKey: string) {
+  const pool = allTypes.filter((t) => key(t) !== selKey)
+  if (kind === 'ServiceDep')
+    return pool.filter((t) => t.kind === 'Service' || t.kind === 'LooselyCoupledService' || t.kind === 'Interface')
+  return pool
+}
 
 // Builds the focus graph: the selected type as an editable class box at the origin, its resolvable
-// associations as neighbour chips placed by side, and one coloured, labelled edge per association.
-function buildGraph(
-  sel: DesignableType,
-  byKey: Map<string, DesignableType>,
-  handlers: Omit<ClassNodeData, 't'>,
-): { nodes: Node[]; edges: Edge[] } {
+// associations as neighbour chips (with one coloured, editable edge each), and a dangling "+" add-stub
+// on every side that expands in place into an add-association form.
+function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: GraphHandlers): { nodes: Node[]; edges: Edge[] } {
   const selKey = key(sel)
   const nodes: Node[] = [
-    { id: selKey, type: 'classNode', position: { x: 0, y: 0 }, data: { t: sel, ...handlers } as unknown as Record<string, unknown> },
+    { id: selKey, type: 'classNode', position: { x: 0, y: 0 }, data: { t: sel, onAdd: h.onAdd, onUpdate: h.onUpdate, onDelete: h.onDelete } as unknown as Record<string, unknown> },
   ]
   const edges: Edge[] = []
 
@@ -409,33 +572,72 @@ function buildGraph(
     resolved.push(a)
   }
 
+  // Per side: neighbour chips first, then one add-stub in the trailing slot (so a bare side shows just
+  // its "+"). Count includes the stub, so everything stays centered together.
   const bySide: Record<Side, string[]> = { top: [], right: [], bottom: [], left: [] }
   for (const [tk, side] of nodeSide) bySide[side].push(tk)
-  for (const side of SIDES)
+  const addSides = ADD_SIDES_BY_KIND[sel.kind] ?? []
+  for (const side of SIDES) {
+    const showStub = addSides.includes(side)
+    const count = bySide[side].length + (showStub ? 1 : 0)
     bySide[side].forEach((tk, i) => {
-      nodes.push({ id: tk, type: 'typeChip', position: placeSide(side, i, bySide[side].length), data: { t: byKey.get(tk)! } })
+      nodes.push({ id: tk, type: 'typeChip', position: placeSide(side, i, count), data: { t: byKey.get(tk)! } })
     })
+    if (!showStub) continue
+    const kind = KIND_OF_SIDE[side]
+    nodes.push({
+      id: 'stub:' + side,
+      type: 'addStub',
+      position: placeSide(side, bySide[side].length, count),
+      data: { side, kind, candidates: candidatesFor(kind, h.allTypes, selKey), onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
+    })
+    edges.push({
+      id: 'stub-e:' + side,
+      source: selKey,
+      target: 'stub:' + side,
+      sourceHandle: side + '-s',
+      targetHandle: OPPOSITE[side] + '-t',
+      style: { stroke: '#334155', strokeWidth: 1, strokeDasharray: '4 4' },
+    })
+  }
 
   resolved.forEach((a, i) => {
     const side = nodeSide.get(a.target)!
     const color = EDGE_COLOR[a.kind]
     edges.push({
       id: 'e' + i,
+      type: 'assoc',
       source: selKey,
       target: a.target,
       sourceHandle: side + '-s',
       targetHandle: OPPOSITE[side] + '-t',
-      label: a.name || undefined,
       style: { stroke: color, strokeWidth: 1.5 },
       markerEnd: { type: MarkerType.ArrowClosed, color },
-      labelStyle: { fill: '#dbeafe', fontSize: 11 },
-      labelBgStyle: { fill: '#0e1526' },
-      labelBgPadding: [4, 2],
-      labelBgBorderRadius: 3,
+      data: {
+        kind: a.kind,
+        name: a.name,
+        onRename: (to: string) => h.onRenameAssoc(a, to),
+        onDelete: () => h.onDeleteAssoc(a),
+      } as unknown as Record<string, unknown>,
     })
   })
 
   return { nodes, edges }
+}
+
+// Which association kind each side creates.
+const KIND_OF_SIDE: Record<Side, string> = { top: 'Inheritance', right: 'Reference', left: 'ServiceDep', bottom: 'Containment' }
+
+// Which associations a type may *own*, so add-stubs only appear where they're legal:
+//   containment / references are model-only decorators; a [ServiceRef] lives on a model or a service;
+//   inheritance is universal; an interface only extends other interfaces.
+// Sides: top = Inheritance, right = Reference, bottom = Containment, left = ServiceDep.
+const ADD_SIDES_BY_KIND: Record<string, Side[]> = {
+  Model: ['top', 'right', 'bottom', 'left'],
+  Service: ['top', 'left'],
+  LooselyCoupledService: ['top', 'left'],
+  Interface: ['top'],
+  Other: [],
 }
 
 function placeSide(side: Side, i: number, n: number) {
@@ -531,6 +733,21 @@ export default function App() {
     dispatch({ op: 'removeMember', typeKey: selectedKey, name })
   }
 
+  const onAddAssoc = (assoc: Association) => {
+    if (!selectedKey || !selected) return
+    if (selected.associations.some((x) => sameAssoc(x, assoc))) return // already there
+    dispatch({ op: 'addAssociation', typeKey: selectedKey, assoc })
+  }
+  const onRenameAssoc = (ref: Association, to: string) => {
+    if (!selectedKey || !selected) return
+    if (selected.associations.some((x) => x.kind === ref.kind && x.target === ref.target && x.name === to)) return // dup
+    dispatch({ op: 'renameAssociation', typeKey: selectedKey, ref, to })
+  }
+  const onDeleteAssoc = (ref: Association) => {
+    if (!selectedKey) return
+    dispatch({ op: 'removeAssociation', typeKey: selectedKey, ref })
+  }
+
   useEffect(() => {
     const c = new signalR.HubConnectionBuilder().withUrl('/hub').build()
     conn.current = c
@@ -572,7 +789,15 @@ export default function App() {
 
   const byKey = useMemo(() => new Map((working?.types ?? []).map((t) => [key(t), t])), [working])
   const { nodes, edges } = selected
-    ? buildGraph(selected, byKey, { onAdd, onUpdate, onDelete })
+    ? buildGraph(selected, byKey, {
+        onAdd,
+        onUpdate,
+        onDelete,
+        allTypes: working?.types ?? [],
+        onAddAssoc,
+        onRenameAssoc,
+        onDeleteAssoc,
+      })
     : { nodes: [], edges: [] }
 
   return (
@@ -631,7 +856,8 @@ export default function App() {
             defaultNodes={nodes}
             defaultEdges={edges}
             nodeTypes={nodeTypes}
-            onNodeClick={(_, node) => node.id !== selectedKey && setSelectedKey(node.id)}
+            edgeTypes={edgeTypes}
+            onNodeClick={(_, node) => node.type === 'typeChip' && node.id !== selectedKey && setSelectedKey(node.id)}
             fitView
             fitViewOptions={{ minZoom: 0.4, maxZoom: 1.2 }}
             colorMode="dark"

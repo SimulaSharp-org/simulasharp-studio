@@ -161,6 +161,82 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 }
 .type-chip:hover { border-color: #2563eb; background: #131c30; }
 .chip-name { overflow: hidden; text-overflow: ellipsis; }
+
+/* interactive edge label (rename / delete an association) */
+.edge-label {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 3px 1px 6px;
+  font-size: 11px;
+  color: #dbeafe;
+  background: #0e1526;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  pointer-events: all;
+}
+.edge-name { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.edge-name.editable { cursor: pointer; }
+.edge-name.editable:hover { text-decoration: underline dotted; }
+.edge-name-edit {
+  width: 90px;
+  font: inherit;
+  font-size: 11px;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #2563eb;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.edge-del {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 1px;
+}
+.edge-del:hover { color: #fecaca; }
+
+/* add-association stub: a "+" on a dangling edge that expands into a form */
+.add-stub { display: flex; }
+.add-stub-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px dashed #475569;
+  background: #0e1526;
+  color: #93c5fd;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.add-stub-btn:hover { border-color: #2563eb; background: #131c30; }
+.stub-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  min-width: 150px;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #0b1020;
+}
+.stub-kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.stub-form select,
+.stub-form input {
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: #0e1526;
+  border: 1px solid #334155;
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+.stub-actions { display: flex; gap: 6px; }
+.stub-actions button { font-size: 12px; padding: 3px 12px; border-radius: 4px; cursor: pointer; }
 .class-members { padding: 4px 0; }
 .member { display: flex; align-items: center; gap: 8px; padding: 3px 12px; }
 .member:hover { background: #172033; }
