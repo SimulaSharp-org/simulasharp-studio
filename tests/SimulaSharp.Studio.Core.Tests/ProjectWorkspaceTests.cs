@@ -24,6 +24,32 @@ public sealed class ProjectWorkspaceTests
         });
     }
 
+    [Test]
+    public async Task Opens_the_DemoSim_project_and_projects_designable_members()
+    {
+        string csproj = FindUp("Studio", "samples", "DemoSim", "DemoSim.csproj");
+
+        var model = await new ProjectWorkspace().OpenAsync(csproj);
+        var eps = model.Types.FirstOrDefault(t => t.Name == "Eps");
+        var battery = model.Types.FirstOrDefault(t => t.Name == "Battery");
+        var env = model.Types.FirstOrDefault(t => t.Name == "Environment");
+        var ipc = model.Types.FirstOrDefault(t => t.Name == "IPowerConsumer");
+
+        var vbus = eps?.Members.SingleOrDefault(m => m.Name == "Vbus");
+        Assert.Multiple(() =>
+        {
+            Assert.That(eps?.Kind, Is.EqualTo("Model"));
+            Assert.That(ipc?.Kind, Is.EqualTo("Interface"));
+            Assert.That(ipc!.Members.Any(m => m.Name == "DrawW" && m.Facets.Contains("Property")), "IPowerConsumer.DrawW property");
+            Assert.That(vbus, Is.Not.Null, "Eps.Vbus should be a single combined row");
+            Assert.That(vbus!.Facets, Does.Contain("Knob").And.Contain("Plottable"), "Eps.Vbus is knob + plottable");
+            Assert.That(battery!.Members.Any(m => m.Name == "CapacityWh" && m.Facets.Contains("Parameter")), "Battery.CapacityWh param");
+            Assert.That(env?.Kind, Is.EqualTo("Service"));
+            Assert.That(env!.Members.Any(m => m.Name == "SunAngle" && m.Facets.Contains("ServiceEvent")), "Env SunAngle event");
+            Assert.That(env.Members.Any(m => m.Name == "CurrentAngle" && m.Facets.Contains("ServiceRequest")), "Env CurrentAngle request");
+        });
+    }
+
     /// <summary>Walks up from the test binary to find a file at the given relative path (locates the repo tree).</summary>
     private static string FindUp(params string[] relative)
     {

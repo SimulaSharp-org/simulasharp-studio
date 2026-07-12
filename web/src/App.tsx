@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ReactFlow, Background, Controls } from '@xyflow/react'
+import { ReactFlow, Background, Controls, type NodeProps } from '@xyflow/react'
 import * as signalR from '@microsoft/signalr'
 import '@xyflow/react/dist/style.css'
 
-type DesignableType = { namespace: string; name: string; kind: string }
+type MemberRow = { name: string; type: string | null; facets: string[] }
+type DesignableType = { namespace: string; name: string; kind: string; members: MemberRow[] }
 type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
 type NsNode = { name: string; children: Map<string, NsNode>; types: DesignableType[] }
@@ -18,8 +19,10 @@ type PhotinoBridge = {
 const photino = () => (window as unknown as PhotinoBridge).external
 
 const KIND_ORDER = ['Model', 'Service', 'LooselyCoupledService', 'Interface', 'Other']
+const key = (t: DesignableType) => t.namespace + '.' + t.name
 
-// Build a nested namespace tree: "A.B.C" becomes folders A > B > C, with types at their leaf.
+// ── Left tree ─────────────────────────────────────────────────────────────────
+
 function buildTree(types: DesignableType[]): NsNode {
   const root: NsNode = { name: '', children: new Map(), types: [] }
   for (const t of types) {
@@ -37,7 +40,9 @@ function buildTree(types: DesignableType[]): NsNode {
   return root
 }
 
-function NsFolder({ node, depth }: { node: NsNode; depth: number }) {
+type TreeProps = { onSelect: (t: DesignableType) => void; selectedKey: string | null }
+
+function NsFolder({ node, depth, ...p }: { node: NsNode; depth: number } & TreeProps) {
   const [open, setOpen] = useState(false)
   const folders = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name))
   const types = [...node.types].sort(byKindThenName)
@@ -51,10 +56,10 @@ function NsFolder({ node, depth }: { node: NsNode; depth: number }) {
       {open && (
         <>
           {folders.map((c) => (
-            <NsFolder key={c.name} node={c} depth={depth + 1} />
+            <NsFolder key={c.name} node={c} depth={depth + 1} {...p} />
           ))}
           {types.map((t) => (
-            <TypeRow key={t.name} t={t} depth={depth + 1} />
+            <TypeRow key={t.name} t={t} depth={depth + 1} {...p} />
           ))}
         </>
       )}
@@ -62,9 +67,14 @@ function NsFolder({ node, depth }: { node: NsNode; depth: number }) {
   )
 }
 
-function TypeRow({ t, depth }: { t: DesignableType; depth: number }) {
+function TypeRow({ t, depth, onSelect, selectedKey }: { t: DesignableType; depth: number } & TreeProps) {
+  const selected = key(t) === selectedKey
   return (
-    <div className="row type" style={{ paddingLeft: depth * 14 + 24 }}>
+    <div
+      className={'row type' + (selected ? ' selected' : '')}
+      style={{ paddingLeft: depth * 14 + 24 }}
+      onClick={() => onSelect(t)}
+    >
       <span className={'badge k-' + t.kind} title={t.kind}>
         {shortKind(t.kind)}
       </span>
@@ -73,10 +83,47 @@ function TypeRow({ t, depth }: { t: DesignableType; depth: number }) {
   )
 }
 
+// ── Canvas: a class component box ──────────────────────────────────────────────
+
+function ClassNode({ data }: NodeProps) {
+  const t = data as unknown as DesignableType
+  return (
+    <div className="class-node">
+      <div className="class-head">
+        <span className={'badge k-' + t.kind} title={t.kind}>
+          {shortKind(t.kind)}
+        </span>
+        <span className="class-name">{t.name}</span>
+      </div>
+      <div className="class-members">
+        {t.members.length === 0 && <div className="member empty">no designable members</div>}
+        {[...t.members].sort(byMember).map((m, i) => (
+          <div key={i} className="member">
+            <span className="mfacets">
+              {m.facets.map((f) => (
+                <span key={f} className={'mbadge c-' + f} title={f}>
+                  {shortCat(f)}
+                </span>
+              ))}
+            </span>
+            <span className="mname">{m.name}</span>
+            {m.type && <span className="mtype">{m.type}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const nodeTypes = { classNode: ClassNode }
+
+// ── App ────────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const conn = useRef<signalR.HubConnection | null>(null)
   const [connected, setConnected] = useState(false)
   const [project, setProject] = useState<ProjectModel | null>(null)
+  const [selected, setSelected] = useState<DesignableType | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -85,6 +132,7 @@ export default function App() {
     setBusy(true)
     setError('')
     setProject(null)
+    setSelected(null)
     try {
       setProject(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
     } catch (e) {
@@ -101,11 +149,8 @@ export default function App() {
       .then(() => setConnected(true))
       .catch((e) => setError('connect: ' + e))
 
-    // Native "Browse" result from the Photino host: "project:<path>".
     photino()?.receiveMessage?.((msg) => {
-      if (msg.startsWith('project:')) {
-        void openPath(msg.slice('project:'.length))
-      }
+      if (msg.startsWith('project:')) void openPath(msg.slice('project:'.length))
     })
 
     return () => {
@@ -115,8 +160,13 @@ export default function App() {
   }, [])
 
   const root = useMemo(() => buildTree(project?.types ?? []), [project])
-  const topFolders = [...root.children.values()].sort((a, b) => a.name.localeCompare(b.name))
-  const globalTypes = [...root.types].sort(byKindThenName)
+  const nodes = useMemo(
+    () =>
+      selected
+        ? [{ id: key(selected), type: 'classNode', position: { x: 0, y: 0 }, data: selected as unknown as Record<string, unknown> }]
+        : [],
+    [selected],
+  )
 
   return (
     <div className="app">
@@ -141,19 +191,29 @@ export default function App() {
               <div className="proj">
                 {project.name} — {project.types.length} types
               </div>
-              {topFolders.map((c) => (
-                <NsFolder key={c.name} node={c} depth={0} />
-              ))}
-              {globalTypes.map((t) => (
-                <TypeRow key={t.name} t={t} depth={0} />
+              {[...root.children.values()]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((c) => (
+                  <NsFolder key={c.name} node={c} depth={0} onSelect={setSelected} selectedKey={selected && key(selected)} />
+                ))}
+              {[...root.types].sort(byKindThenName).map((t) => (
+                <TypeRow key={t.name} t={t} depth={0} onSelect={setSelected} selectedKey={selected && key(selected)} />
               ))}
             </div>
           )}
         </aside>
         <main className="canvas">
-          <ReactFlow defaultNodes={[]} defaultEdges={[]} fitView colorMode="dark">
+          <ReactFlow
+            key={selected ? key(selected) : 'empty'}
+            defaultNodes={nodes}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{ minZoom: 0.5, maxZoom: 1.2 }}
+            colorMode="dark"
+            nodesConnectable={false}
+          >
             <Background />
-            <Controls />
+            <Controls showInteractive={false} />
           </ReactFlow>
         </main>
       </div>
@@ -161,8 +221,17 @@ export default function App() {
   )
 }
 
+// ── helpers ─────────────────────────────────────────────────────────────────────
+
 function byKindThenName(a: DesignableType, b: DesignableType) {
   const k = KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind)
+  return k !== 0 ? k : a.name.localeCompare(b.name)
+}
+
+const CAT_ORDER = ['Parameter', 'Knob', 'Plottable', 'ServiceRequest', 'ServiceEvent']
+function byMember(a: MemberRow, b: MemberRow) {
+  const rank = (m: MemberRow) => Math.min(...m.facets.map((f) => CAT_ORDER.indexOf(f)))
+  const k = rank(a) - rank(b)
   return k !== 0 ? k : a.name.localeCompare(b.name)
 }
 
@@ -176,6 +245,27 @@ function shortKind(kind: string) {
       return 'LC'
     case 'Interface':
       return 'I'
+    default:
+      return '·'
+  }
+}
+
+function shortCat(cat: string) {
+  switch (cat) {
+    case 'Parameter':
+      return 'Pa'
+    case 'Knob':
+      return 'K'
+    case 'Plottable':
+      return 'Pl'
+    case 'ServiceRequest':
+      return 'Rq'
+    case 'ServiceEvent':
+      return 'Ev'
+    case 'Property':
+      return 'P'
+    case 'Method':
+      return '()'
     default:
       return '·'
   }

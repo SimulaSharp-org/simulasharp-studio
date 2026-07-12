@@ -100,3 +100,55 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .badge.k-Interface { background: #4a1d6e; color: #e9d5ff; }
 
 .canvas { flex: 1; min-height: 0; }
+.row.type { cursor: pointer; }
+.row.type.selected { background: #1e3a8a55; }
+
+/* class component box on the canvas */
+.class-node {
+  min-width: 210px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0e1526;
+  color: #dbeafe;
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.class-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-weight: 600;
+  background: #172033;
+  border-bottom: 1px solid #334155;
+}
+.class-name { overflow: hidden; text-overflow: ellipsis; }
+.class-members { padding: 4px 0; }
+.member { display: flex; align-items: center; gap: 8px; padding: 3px 12px; }
+.member .mfacets { display: inline-flex; gap: 3px; flex-shrink: 0; }
+.member .mname { flex: 1; }
+.member .mtype { opacity: 0.5; font-size: 12px; }
+.member.empty { opacity: 0.5; font-style: italic; justify-content: center; padding: 8px; }
+
+.mbadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #334155;
+  color: #cbd5e1;
+  flex-shrink: 0;
+}
+.mbadge.c-Parameter { background: #374151; color: #e5e7eb; }
+.mbadge.c-Knob { background: #1e3a8a; color: #bfdbfe; }
+.mbadge.c-Plottable { background: #134e4a; color: #99f6e4; }
+.mbadge.c-ServiceRequest { background: #4a1d6e; color: #e9d5ff; }
+.mbadge.c-ServiceEvent { background: #713f12; color: #fde68a; }
+.mbadge.c-Property { background: #3f3f46; color: #e4e4e7; }
+.mbadge.c-Method { background: #422006; color: #fed7aa; }
