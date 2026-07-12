@@ -15,6 +15,21 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   border-bottom: 1px solid #1e293b;
 }
 .topbar .status { opacity: 0.7; font-size: 14px; }
+.topbar .edits { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.topbar .pending { opacity: 0.5; }
+.topbar .pending.active { opacity: 1; color: #fcd34d; }
+.topbar .edits button {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #334155;
+  background: #172033;
+  color: #dbeafe;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.topbar .edits button:hover:not(:disabled) { background: #1e293b; }
+.topbar .edits button:disabled { opacity: 0.4; cursor: default; }
 
 .body { flex: 1; min-height: 0; display: flex; }
 
@@ -126,9 +141,36 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .class-name { overflow: hidden; text-overflow: ellipsis; }
 .class-members { padding: 4px 0; }
 .member { display: flex; align-items: center; gap: 8px; padding: 3px 12px; }
+.member:hover { background: #172033; }
 .member .mfacets { display: inline-flex; gap: 3px; flex-shrink: 0; }
-.member .mname { flex: 1; }
+.member .mname { flex: 1; cursor: text; border-radius: 3px; padding: 0 2px; }
+.member .mname:hover { background: #1e293b; outline: 1px dashed #334155; }
+.member .mname-edit {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #2563eb;
+  border-radius: 3px;
+  padding: 0 2px;
+}
 .member .mtype { opacity: 0.5; font-size: 12px; }
+.member .mdel {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 15px;
+  opacity: 0;
+}
+.member:hover .mdel { opacity: 1; }
+.member .mdel:hover { background: #7f1d1d; color: #fecaca; }
 .member.empty { opacity: 0.5; font-style: italic; justify-content: center; padding: 8px; }
 
 .mbadge {
