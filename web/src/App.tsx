@@ -21,6 +21,17 @@ const photino = () => (window as unknown as PhotinoBridge).external
 const KIND_ORDER = ['Model', 'Service', 'LooselyCoupledService', 'Interface', 'Other']
 const key = (t: DesignableType) => t.namespace + '.' + t.name
 
+// The attributes a member may carry, gated by its owning type's kind. A member is defined by at
+// least one of these. Interfaces are the odd one out — a member is a Property XOR a Method, so its
+// attribute set is single-choice (see MemberForm).
+const FACETS_BY_KIND: Record<string, string[]> = {
+  Model: ['Parameter', 'Knob', 'Plottable'],
+  Service: ['Parameter', 'Knob', 'Plottable', 'ServiceRequest', 'ServiceEvent'],
+  LooselyCoupledService: ['ServiceRequest', 'ServiceEvent'],
+  Interface: ['Property', 'Method'],
+  Other: [],
+}
+
 // ── Pending edit journal ────────────────────────────────────────────────────────
 // Edits never touch the backend-derived baseline directly; each is an Action appended to a journal.
 // The working IR the UI renders is `baseline` folded through the journal — so undo is "drop the last
@@ -28,13 +39,16 @@ const key = (t: DesignableType) => t.namespace + '.' + t.name
 // through Roslyn to write the edits back to source.
 
 type Action =
-  | { op: 'renameMember'; typeKey: string; from: string; to: string }
+  | { op: 'addMember'; typeKey: string; member: MemberRow }
+  | { op: 'updateMember'; typeKey: string; name: string; member: MemberRow }
   | { op: 'removeMember'; typeKey: string; name: string }
 
 function applyToType(t: DesignableType, a: Action): DesignableType {
   switch (a.op) {
-    case 'renameMember':
-      return { ...t, members: t.members.map((m) => (m.name === a.from ? { ...m, name: a.to } : m)) }
+    case 'addMember':
+      return { ...t, members: [...t.members, a.member] }
+    case 'updateMember':
+      return { ...t, members: t.members.map((m) => (m.name === a.name ? a.member : m)) }
     case 'removeMember':
       return { ...t, members: t.members.filter((m) => m.name !== a.name) }
   }
@@ -106,58 +120,121 @@ function TypeRow({ t, depth, onSelect, selectedKey }: { t: DesignableType; depth
   )
 }
 
+// ── The member mini-form ─────────────────────────────────────────────────────────
+// Shared by add (initial null) and edit (initial = the member). Governs name, type and the member's
+// attribute set. At least one attribute is required — Save stays disabled until name and ≥1 attribute
+// are present, and the last attribute chip cannot be removed.
+
+function MemberForm({
+  kind,
+  initial,
+  onSave,
+  onCancel,
+}: {
+  kind: string
+  initial: MemberRow | null
+  onSave: (m: MemberRow) => void
+  onCancel: () => void
+}) {
+  const [name, setName] = useState(initial?.name ?? '')
+  const [type, setType] = useState(initial?.type ?? '')
+  const [facets, setFacets] = useState<string[]>(initial?.facets ?? [])
+
+  const catalog = FACETS_BY_KIND[kind] ?? []
+  const single = kind === 'Interface' // a member is a Property XOR a Method
+  const addable = catalog.filter((f) => !facets.includes(f))
+  const valid = name.trim().length > 0 && facets.length > 0
+
+  const commit = () => valid && onSave({ name: name.trim(), type: type.trim() || null, facets })
+
+  return (
+    <div className="member-form" onClick={(e) => e.stopPropagation()}>
+      <div className="mf-row">
+        <input
+          className="mf-name"
+          placeholder="name"
+          value={name}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && commit()}
+        />
+        <input
+          className="mf-type"
+          placeholder="type"
+          value={type}
+          onChange={(e) => setType(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && commit()}
+        />
+      </div>
+      <div className="mf-facets">
+        {single ? (
+          <select className="mf-single" value={facets[0] ?? ''} onChange={(e) => setFacets(e.target.value ? [e.target.value] : [])}>
+            <option value="">— kind —</option>
+            {catalog.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <>
+            {facets.map((f) => (
+              <span key={f} className={'mbadge c-' + f} title={f}>
+                {f}
+                <button
+                  className="mf-facet-del"
+                  disabled={facets.length <= 1}
+                  title={facets.length <= 1 ? 'a member needs at least one attribute' : 'remove attribute'}
+                  onClick={() => setFacets(facets.filter((x) => x !== f))}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {addable.length > 0 && (
+              <select
+                className="mf-add-facet"
+                value=""
+                onChange={(e) => e.target.value && setFacets([...facets, e.target.value])}
+              >
+                <option value="">+ attr</option>
+                {addable.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            )}
+          </>
+        )}
+      </div>
+      <div className="mf-actions">
+        <button className="mf-save" disabled={!valid} onClick={commit}>
+          Save
+        </button>
+        <button className="mf-cancel" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Canvas: an editable class component box ───────────────────────────────────────
 
 type ClassNodeData = {
   t: DesignableType
-  onRename: (from: string, to: string) => void
+  onAdd: (member: MemberRow) => void
+  onUpdate: (name: string, member: MemberRow) => void
   onDelete: (name: string) => void
 }
 
-/// An inline-editable member name: click to edit, Enter/blur commits, Escape cancels.
-function EditableName({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
-  const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(value)
-  const cancelled = useRef(false)
-
-  if (!editing)
-    return (
-      <span
-        className="mname"
-        title="click to rename"
-        onClick={() => {
-          setText(value)
-          cancelled.current = false
-          setEditing(true)
-        }}
-      >
-        {value}
-      </span>
-    )
-
-  return (
-    <input
-      className="mname-edit"
-      autoFocus
-      value={text}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        setEditing(false)
-        if (!cancelled.current) onCommit(text)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        else if (e.key === 'Escape') {
-          cancelled.current = true
-          ;(e.target as HTMLInputElement).blur()
-        }
-      }}
-    />
-  )
-}
-
 function ClassNode({ data }: NodeProps) {
-  const { t, onRename, onDelete } = data as unknown as ClassNodeData
+  const { t, onAdd, onUpdate, onDelete } = data as unknown as ClassNodeData
+  const [editing, setEditing] = useState<string | null>(null) // member name whose form is open
+  const [adding, setAdding] = useState(false)
+  const canAdd = (FACETS_BY_KIND[t.kind] ?? []).length > 0
+
   return (
     <div className="class-node">
       <div className="class-head">
@@ -167,24 +244,71 @@ function ClassNode({ data }: NodeProps) {
         <span className="class-name">{t.name}</span>
       </div>
       <div className="class-members">
-        {t.members.length === 0 && <div className="member empty">no designable members</div>}
+        {t.members.length === 0 && !adding && <div className="member empty">no designable members</div>}
         {[...t.members].sort(byMember).map((m) => (
-          <div key={m.name} className="member">
-            <span className="mfacets">
-              {m.facets.map((f) => (
-                <span key={f} className={'mbadge c-' + f} title={f}>
-                  {shortCat(f)}
-                </span>
-              ))}
-            </span>
-            <EditableName value={m.name} onCommit={(v) => onRename(m.name, v)} />
-            {m.type && <span className="mtype">{m.type}</span>}
-            <button className="mdel" title="delete member" onClick={() => onDelete(m.name)}>
-              ×
-            </button>
+          <div key={m.name}>
+            <div className="member">
+              <span className="mfacets">
+                {m.facets.map((f) => (
+                  <span key={f} className={'mbadge c-' + f} title={f}>
+                    {shortCat(f)}
+                  </span>
+                ))}
+              </span>
+              <span
+                className="mname"
+                title="click to edit"
+                onClick={() => {
+                  setAdding(false)
+                  setEditing((cur) => (cur === m.name ? null : m.name))
+                }}
+              >
+                {m.name}
+              </span>
+              {m.type && <span className="mtype">{m.type}</span>}
+              <button className="mdel" title="delete member" onClick={() => onDelete(m.name)}>
+                ×
+              </button>
+            </div>
+            {editing === m.name && (
+              <MemberForm
+                kind={t.kind}
+                initial={m}
+                onSave={(nm) => {
+                  setEditing(null)
+                  onUpdate(m.name, nm)
+                }}
+                onCancel={() => setEditing(null)}
+              />
+            )}
           </div>
         ))}
       </div>
+      {canAdd && (
+        <div className="class-foot">
+          {adding ? (
+            <MemberForm
+              kind={t.kind}
+              initial={null}
+              onSave={(nm) => {
+                setAdding(false)
+                onAdd(nm)
+              }}
+              onCancel={() => setAdding(false)}
+            />
+          ) : (
+            <button
+              className="add-member"
+              onClick={() => {
+                setEditing(null)
+                setAdding(true)
+              }}
+            >
+              + member
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -254,11 +378,15 @@ export default function App() {
     setRev((r) => r + 1)
   }
 
-  const onRename = (from: string, to: string) => {
-    const t = to.trim()
-    if (!t || t === from || !selected || !selectedKey) return
-    if (selected.members.some((m) => m.name === t)) return // no duplicate names on one type
-    dispatch({ op: 'renameMember', typeKey: selectedKey, from, to: t })
+  const onAdd = (member: MemberRow) => {
+    if (!selectedKey || !selected) return
+    if (selected.members.some((m) => m.name === member.name)) return // no duplicate names on one type
+    dispatch({ op: 'addMember', typeKey: selectedKey, member })
+  }
+  const onUpdate = (name: string, member: MemberRow) => {
+    if (!selectedKey || !selected) return
+    if (member.name !== name && selected.members.some((m) => m.name === member.name)) return // renamed onto an existing member
+    dispatch({ op: 'updateMember', typeKey: selectedKey, name, member })
   }
   const onDelete = (name: string) => {
     if (!selectedKey) return
@@ -282,11 +410,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo. Re-subscribed on journal/redo so it sees them.
+  // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo — but never while a text field is focused, so
+  // in-form text undo stays native.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const ctrl = e.ctrlKey || e.metaKey
       if (!ctrl) return
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       const k = e.key.toLowerCase()
       if (k === 'z') {
         e.preventDefault()
@@ -307,7 +438,7 @@ export default function App() {
           id: selectedKey!,
           type: 'classNode',
           position: { x: 0, y: 0 },
-          data: { t: selected, onRename, onDelete } as unknown as Record<string, unknown>,
+          data: { t: selected, onAdd, onUpdate, onDelete } as unknown as Record<string, unknown>,
         },
       ]
     : []

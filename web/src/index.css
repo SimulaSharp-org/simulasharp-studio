@@ -143,18 +143,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .member { display: flex; align-items: center; gap: 8px; padding: 3px 12px; }
 .member:hover { background: #172033; }
 .member .mfacets { display: inline-flex; gap: 3px; flex-shrink: 0; }
-.member .mname { flex: 1; cursor: text; border-radius: 3px; padding: 0 2px; }
+.member .mname { flex: 1; cursor: pointer; border-radius: 3px; padding: 0 2px; }
 .member .mname:hover { background: #1e293b; outline: 1px dashed #334155; }
-.member .mname-edit {
-  flex: 1;
-  min-width: 0;
-  font: inherit;
-  color: #fff;
-  background: #0b1020;
-  border: 1px solid #2563eb;
-  border-radius: 3px;
-  padding: 0 2px;
-}
 .member .mtype { opacity: 0.5; font-size: 12px; }
 .member .mdel {
   flex-shrink: 0;
@@ -172,6 +162,68 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .member:hover .mdel { opacity: 1; }
 .member .mdel:hover { background: #7f1d1d; color: #fecaca; }
 .member.empty { opacity: 0.5; font-style: italic; justify-content: center; padding: 8px; }
+
+/* member mini-form (add / edit) */
+.member-form {
+  margin: 2px 8px 6px;
+  padding: 8px;
+  border: 1px solid #2563eb;
+  border-radius: 5px;
+  background: #0b1020;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.member-form input,
+.member-form select {
+  font: inherit;
+  color: #fff;
+  background: #0e1526;
+  border: 1px solid #334155;
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+.mf-row { display: flex; gap: 6px; }
+.mf-name { flex: 1; min-width: 0; }
+.mf-type { flex: 1; min-width: 0; }
+.mf-facets { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.mf-facets .mbadge { gap: 3px; padding-right: 3px; }
+.mf-facet-del {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 1px;
+}
+.mf-facet-del:disabled { opacity: 0.35; cursor: default; }
+.mf-add-facet, .mf-single { font-size: 12px; }
+.mf-actions { display: flex; gap: 6px; }
+.mf-actions button {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mf-save { border: 1px solid #2563eb; background: #1d4ed8; color: #fff; }
+.mf-save:disabled { opacity: 0.4; cursor: default; }
+.mf-cancel { border: 1px solid #334155; background: #172033; color: #dbeafe; }
+
+.class-foot { padding: 4px 8px 8px; border-top: 1px solid #1e293b; }
+.add-member {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px;
+  border: 1px dashed #334155;
+  border-radius: 4px;
+  background: transparent;
+  color: #93c5fd;
+  cursor: pointer;
+}
+.add-member:hover { background: #172033; }
 
 .mbadge {
   display: inline-flex;
