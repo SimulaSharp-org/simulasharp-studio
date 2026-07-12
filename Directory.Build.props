@@ -13,4 +13,15 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <!--
+    MSBuildWorkspace: the Microsoft.Build.* assemblies that Microsoft.CodeAnalysis.Workspaces.MSBuild drags in
+    must be loaded from the installed .NET SDK by MSBuildLocator at run time, NOT copied from the NuGet package
+    (they clash otherwise — MSBL001). Excluding their runtime assets here covers Core and everything that
+    references it (Host, Tests) transitively.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.48" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
 </Project>
+

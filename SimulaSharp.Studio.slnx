@@ -3,4 +3,7 @@
     <Project Path="src/SimulaSharp.Studio.Core/SimulaSharp.Studio.Core.csproj" />
     <Project Path="src/SimulaSharp.Studio.Host/SimulaSharp.Studio.Host.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SimulaSharp.Studio.Core.Tests/SimulaSharp.Studio.Core.Tests.csproj" />
+  </Folder>
 </Solution>
