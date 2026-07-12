@@ -1,0 +1,20 @@
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: #0b1020;
+  color: #dbeafe;
+  border-bottom: 1px solid #1e293b;
+}
+.topbar .status { opacity: 0.7; font-size: 14px; }
+
+.canvas { flex: 1; min-height: 0; }
