@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SimulaSharp.Studio.Core/SimulaSharp.Studio.Core.csproj" />
+    <Project Path="src/SimulaSharp.Studio.Host/SimulaSharp.Studio.Host.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,16 @@
+<Project>
+
+  <!--
+    Isolates SimulaSharp.Studio from the framework repo's root Directory.Build.props (which carries the
+    package Version, metadata, LICENSE packing, snupkg, etc.). MSBuild imports only the *nearest*
+    Directory.Build.props walking up, so this file stops the walk before the repo root — Studio is a tool,
+    not a packed framework artifact.
+  -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>
