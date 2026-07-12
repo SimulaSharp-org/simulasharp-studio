@@ -38,6 +38,7 @@ public sealed class ProjectWorkspace
         foreach (var t in DeclaredTypes(compilation.Assembly.GlobalNamespace))
         {
             if (t.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal)) continue;
+            if (!IsUserDeclared(t)) continue;   // skip source-generator output (<Type>Ref, companion interfaces, …)
             string ns = t.ContainingNamespace.IsGlobalNamespace ? "" : t.ContainingNamespace.ToDisplayString();
             types.Add(new DesignableType(ns, t.Name, Classify(t, iModel, iService, lcBase)));
         }
@@ -58,6 +59,12 @@ public sealed class ProjectWorkspace
         if (Implements(iService)) return "Service";
         return "Other";
     }
+
+    /// <summary>True if the type has at least one declaration in a hand-written (non <c>.g.cs</c>) source file —
+    /// i.e. it isn't purely source-generator output. A partial model (user file + generated members) qualifies.</summary>
+    private static bool IsUserDeclared(INamedTypeSymbol t) =>
+        t.DeclaringSyntaxReferences.Any(r =>
+            !r.SyntaxTree.FilePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase));
 
     private static bool Inherits(INamedTypeSymbol t, INamedTypeSymbol baseType)
     {

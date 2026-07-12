@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <!--
+    A small consumer simulation: real user models/services/interface using the current decorators, with the
+    generated members supplied by the CodeGen analyzer. Serves as a Studio test fixture (and the thing the
+    editors are grown against). References the framework by ProjectReference so it builds in-repo.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Kernel\Kernel.csproj" />
+    <ProjectReference Include="..\..\..\CodeGen\SimulaSharp.CodeGen.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
