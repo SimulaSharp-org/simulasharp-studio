@@ -906,11 +906,145 @@ function placeSide(side: Side, i: number, n: number) {
   }
 }
 
-// ── Topology view (top level: services | sites) ────────────────────────────────
+// ── Topology view (top level: services | sites) + site drill-in ─────────────────
 
 const shortType = (t: string) => t.split('.').pop() ?? t
 
-function TopologyView({ assemblies }: { assemblies: AssemblyModel[] | null }) {
+// A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges, shows its
+// Config, and exposes one source handle per container so that container's child edges fan from a single point.
+function TopoInstanceNode({ data }: NodeProps) {
+  const d = data as { inst: ModelInstance; focused: boolean }
+  const inst = d.inst
+  const config = Object.entries(inst.config)
+  return (
+    <div className={'topo-fnode inst' + (d.focused ? ' focused' : '')}>
+      <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
+      <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
+      {d.focused &&
+        inst.containers.map((c, i) => (
+          <Handle
+            key={c.name}
+            id={'c' + i}
+            type="source"
+            position={Position.Bottom}
+            className="nh"
+            isConnectable={false}
+            style={{ left: `${((i + 1) / (inst.containers.length + 1)) * 100}%` }}
+          />
+        ))}
+      <div className="topo-fnode-head">{inst.name}</div>
+      <div className="topo-fnode-type">{inst.type}</div>
+      {d.focused && config.length > 0 && (
+        <div className="topo-props">
+          {config.map(([k, v]) => (
+            <span key={k} className="topo-chip">
+              {k} = {v}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const topoNodeTypes = { inst: TopoInstanceNode }
+
+const cEdge = (id: string, source: string, target: string, sh: string, label?: string): Edge => ({
+  id,
+  source,
+  target,
+  sourceHandle: sh,
+  targetHandle: 't',
+  label,
+  style: { stroke: EDGE_COLOR.Containment, strokeWidth: 1.5 },
+  markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR.Containment },
+  labelStyle: { fill: '#dbeafe', fontSize: 11 },
+  labelBgStyle: { fill: '#0e1526' },
+  labelBgPadding: [4, 2],
+  labelBgBorderRadius: 3,
+})
+
+// The site canvas: a containment tree. Children are merged (flat, unlabelled edges from one point) until their
+// parent is the focused node, when each container's edges fan from a per-container point and carry the container name.
+function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | null): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = []
+  const edges: Edge[] = []
+  const X = 220
+  const Y = 150
+  let leaf = 0
+
+  const walk = (inst: ModelInstance, parentPath: string, depth: number): { id: string; x: number } => {
+    const path = parentPath + '.' + inst.name
+    const id = 'i:' + path
+    const focused = path === focus
+    const childXs: number[] = []
+    inst.containers.forEach((c, ci) => {
+      c.children.forEach((ch, j) => {
+        const r = walk(ch, path, depth + 1)
+        // focused → one fan per container from handle 'c<ci>', labelled once; merged → plain edge from 'b'.
+        edges.push(focused ? cEdge(`c:${id}>${r.id}`, id, r.id, 'c' + ci, j === 0 ? c.name : undefined) : cEdge(`c:${id}>${r.id}`, id, r.id, 'b'))
+        childXs.push(r.x)
+      })
+    })
+    const x = childXs.length ? (childXs[0] + childXs[childXs.length - 1]) / 2 : leaf++ * X
+    nodes.push({ id, type: 'inst', position: { x, y: depth * Y }, data: { inst, focused } })
+    return { id, x }
+  }
+
+  for (const m of site.models) walk(m, asm.name, 0)
+  return { nodes, edges }
+}
+
+function SiteView({ asm, site, onBack }: { asm: AssemblyModel; site: SiteInstance; onBack: () => void }) {
+  const [focus, setFocus] = useState<string | null>(null)
+  const { nodes, edges } = buildSiteGraph(asm, site, focus)
+
+  // ESC ascends one level (child → parent → site); clicking a node descends onto it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setFocus((f) => {
+        if (!f) return null
+        const parent = f.slice(0, f.lastIndexOf('.'))
+        return parent === asm.name || !parent.includes('.') ? null : parent
+      })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [asm.name])
+
+  return (
+    <div className="topo-site">
+      <div className="topo-site-head">
+        <button className="topo-back" onClick={onBack}>
+          ← Sites
+        </button>
+        <span className="topo-site-name">{site.name}</span>
+        <span className="topo-dim">
+          · max {site.maxEvents} events{focus ? ` · ${focus.slice(asm.name.length + 1)}` : ''}
+        </span>
+      </div>
+      <div className="topo-canvas">
+        <ReactFlow
+          key={'site:' + (focus ?? '')}
+          defaultNodes={nodes}
+          defaultEdges={edges}
+          nodeTypes={topoNodeTypes}
+          onNodeClick={(_, node) => setFocus(node.id.slice(2))}
+          fitView
+          fitViewOptions={{ minZoom: 0.3, maxZoom: 1.3 }}
+          colorMode="dark"
+          nodesConnectable={false}
+        >
+          <Background />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
+    </div>
+  )
+}
+
+function TopologyView({ assemblies, onOpenSite }: { assemblies: AssemblyModel[] | null; onOpenSite: (asm: AssemblyModel, s: SiteInstance) => void }) {
   if (assemblies === null) return <div className="topo-empty">Loading topology…</div>
   if (!assemblies.length) return <div className="topo-empty">No assemblies (*.simassembly.yaml) registered in this project.</div>
   return (
@@ -940,9 +1074,11 @@ function TopologyView({ assemblies }: { assemblies: AssemblyModel[] | null }) {
             <section className="topo-col">
               <div className="topo-col-title">Sites · {a.sites.length}</div>
               {a.sites.map((site) => (
-                <div key={site.name} className="topo-card site" title="open site">
+                <div key={site.name} className="topo-card site" title="open site" onClick={() => onOpenSite(a, site)}>
                   <span className="topo-card-name">{site.name}</span>
-                  <button className="topo-del" title="delete site">×</button>
+                  <button className="topo-del" title="delete site" onClick={(e) => e.stopPropagation()}>
+                    ×
+                  </button>
                 </div>
               ))}
               {!a.sites.length && <div className="topo-col-empty">no sites</div>}
@@ -969,6 +1105,7 @@ export default function App() {
   const [genMsg, setGenMsg] = useState('')
   const [mode, setMode] = useState<'design' | 'topology'>('design')
   const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // null = not yet loaded
+  const [openSite, setOpenSite] = useState<{ asm: AssemblyModel; site: SiteInstance } | null>(null) // drilled-into site
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
@@ -993,6 +1130,7 @@ export default function App() {
     setRedo([])
     setRev(0)
     setAssemblies(null) // re-fetched lazily when the Topology tab is opened
+    setOpenSite(null)
     try {
       setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
     } catch (e) {
@@ -1294,10 +1432,16 @@ export default function App() {
       </header>
       <div className="body">
         {mode === 'topology' ? (
-          <main className="topo-main">
-            {error && <div className="error">{error}</div>}
-            <TopologyView assemblies={assemblies} />
-          </main>
+          openSite ? (
+            <main className="topo-site-main">
+              <SiteView asm={openSite.asm} site={openSite.site} onBack={() => setOpenSite(null)} />
+            </main>
+          ) : (
+            <main className="topo-main">
+              {error && <div className="error">{error}</div>}
+              <TopologyView assemblies={assemblies} onOpenSite={(asm, site) => setOpenSite({ asm, site })} />
+            </main>
+          )
         ) : (
         <>
         <aside className="sidebar">
