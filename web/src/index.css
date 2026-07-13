@@ -165,8 +165,11 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 }
 .nt-stable { opacity: 0.6; font-size: 13px; white-space: nowrap; }
 .nt-declared { flex: 1; min-width: 0; border: none !important; background: transparent !important; padding: 6px 2px !important; }
+.modal-body { font-size: 13px; opacity: 0.85; line-height: 1.5; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions button { font-size: 13px; padding: 5px 14px; border-radius: 4px; cursor: pointer; }
+.danger-btn { border: 1px solid #7f1d1d; background: #450a0a; color: #fca5a5; }
+.danger-btn:hover { background: #7f1d1d; color: #fecaca; }
 
 .row {
   display: flex;

@@ -96,6 +96,7 @@ type Action =
   | { op: 'renameType'; typeKey: string; to: string }
   | { op: 'removeType'; typeKey: string }
   | { op: 'renameNamespace'; typeKey: string; to: string } // typeKey = old namespace, to = new namespace
+  | { op: 'moveType'; typeKey: string; to: string } // to = target namespace
 type ActionList = { op: 'bundle'; label: string; actions: Action[] }
 type Entry = Action | ActionList
 
@@ -139,6 +140,16 @@ function applyAction(model: ProjectModel, a: Action): ProjectModel {
           const renamed = key(t) === a.typeKey ? { ...t, name: a.to } : t
           // keep association edges pointing at the renamed type resolvable
           return { ...renamed, associations: renamed.associations.map((x) => (x.target === a.typeKey ? { ...x, target: newKey } : x)) }
+        }),
+      }
+    }
+    case 'moveType': {
+      const newKey = a.to ? a.to + '.' + nameOf(a.typeKey) : nameOf(a.typeKey)
+      return {
+        ...model,
+        types: model.types.map((t) => {
+          const moved = key(t) === a.typeKey ? { ...t, namespace: a.to } : t
+          return { ...moved, associations: moved.associations.map((x) => (x.target === a.typeKey ? { ...x, target: newKey } : x)) }
         }),
       }
     }
@@ -436,6 +447,45 @@ function MemberForm({
         <button className="mf-cancel" onClick={onCancel}>
           Cancel
         </button>
+      </div>
+    </div>
+  )
+}
+
+function DeleteNamespaceDialog({ ns, count, onDeleteAll, onMoveUp, onCancel }: { ns: string; count: number; onDeleteAll: () => void; onMoveUp: () => void; onCancel: () => void }) {
+  const parent = ns.includes('.') ? ns.slice(0, ns.lastIndexOf('.')) : '(root)'
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">Delete namespace {ns}</div>
+        <div className="modal-body">
+          It holds {count} type{count !== 1 ? 's' : ''}. Move them up to <strong>{parent}</strong>, or delete them?
+        </div>
+        <div className="modal-actions">
+          <button className="mf-cancel" onClick={onCancel}>Cancel</button>
+          <button className="mf-save" onClick={onMoveUp}>Move up</button>
+          <button className="danger-btn" onClick={onDeleteAll}>Delete all</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MoveTypeDialog({ typeKey, onMove, onCancel }: { typeKey: string; onMove: (typeKey: string, ns: string) => void; onCancel: () => void }) {
+  const [ns, setNs] = useState(typeKey.includes('.') ? typeKey.slice(0, typeKey.lastIndexOf('.')) : '')
+  const name = typeKey.includes('.') ? typeKey.slice(typeKey.lastIndexOf('.') + 1) : typeKey
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">Move {name}</div>
+        <div className="nt-key">
+          <input className="nt-declared" autoFocus placeholder="target namespace" value={ns} onChange={(e) => setNs(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onMove(typeKey, ns)} />
+          <span className="nt-stable">.{name}</span>
+        </div>
+        <div className="modal-actions">
+          <button className="mf-cancel" onClick={onCancel}>Cancel</button>
+          <button className="mf-save" onClick={() => onMove(typeKey, ns)}>Move</button>
+        </div>
       </div>
     </div>
   )
@@ -837,6 +887,8 @@ export default function App() {
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
   const [newTypeNs, setNewTypeNs] = useState<string | null>(null) // stable prefix for the New Type dialog
+  const [deleteNs, setDeleteNs] = useState<string | null>(null) // namespace pending a delete/move-up choice
+  const [movingType, setMovingType] = useState<string | null>(null) // type key pending a "Move to…" target
 
   const working = useMemo(() => (baseline ? journal.reduce(applyEntry, baseline) : null), [baseline, journal])
   const selected = useMemo(
@@ -990,11 +1042,38 @@ export default function App() {
   }
   const onRenameNsCancel = () => setRenamingNs(null)
 
+  const typesUnder = (ns: string) => (working?.types ?? []).filter((t) => t.namespace === ns || t.namespace.startsWith(ns + '.'))
+
   const onDeleteNamespace = (ns: string) => {
-    const victims = (working?.types ?? []).filter((t) => t.namespace === ns || t.namespace.startsWith(ns + '.'))
+    setDeleteNs(null)
+    const victims = typesUnder(ns)
     if (!victims.length) return
     dispatch({ op: 'bundle', label: `Delete namespace ${ns}`, actions: victims.map((t) => ({ op: 'removeType', typeKey: key(t) })) })
     if (selectedKey && victims.some((t) => key(t) === selectedKey)) setSelectedKey(null)
+  }
+
+  // Reparent everything under a namespace one level up (strip its leaf segment), then the namespace is gone.
+  const onMoveNamespaceUp = (ns: string) => {
+    setDeleteNs(null)
+    const victims = typesUnder(ns)
+    if (!victims.length) return
+    const leafIndex = ns.split('.').length - 1
+    const stripLeaf = (typeNs: string) => typeNs.split('.').filter((_, i) => i !== leafIndex).join('.')
+    dispatch({ op: 'bundle', label: `Move ${ns} contents up`, actions: victims.map((t) => ({ op: 'moveType', typeKey: key(t), to: stripLeaf(t.namespace) })) })
+    if (selectedKey && victims.some((t) => key(t) === selectedKey)) {
+      const sns = stripLeaf(nsOf(selectedKey))
+      setSelectedKey(sns ? sns + '.' + nameOf(selectedKey) : nameOf(selectedKey))
+    }
+  }
+
+  const onMoveType = (typeKey: string, targetNs: string) => {
+    setMovingType(null)
+    const to = targetNs.trim()
+    if (to === nsOf(typeKey)) return
+    const newKey = to ? to + '.' + nameOf(typeKey) : nameOf(typeKey)
+    if (working?.types.some((t) => key(t) === newKey)) return // collision
+    dispatch({ op: 'moveType', typeKey, to })
+    if (selectedKey === typeKey) setSelectedKey(newKey)
   }
 
   const onNewType = (typeKey: string, kind: string) => {
@@ -1174,13 +1253,14 @@ export default function App() {
             {menu.kind === 'type' ? (
               <>
                 <button onClick={() => { setRenamingKey(menu.target); setMenu(null) }}>Rename</button>
+                <button onClick={() => { setMovingType(menu.target); setMenu(null) }}>Move to…</button>
                 <button className="danger" onClick={() => { onRemoveType(menu.target); setMenu(null) }}>Delete</button>
               </>
             ) : (
               <>
                 <button onClick={() => { setRenamingNs(menu.target); setMenu(null) }}>Rename</button>
                 <button onClick={() => { setNewTypeNs(menu.target); setMenu(null) }}>New type…</button>
-                <button className="danger" onClick={() => { onDeleteNamespace(menu.target); setMenu(null) }}>Delete namespace…</button>
+                <button className="danger" onClick={() => { setDeleteNs(menu.target); setMenu(null) }}>Delete namespace…</button>
               </>
             )}
           </div>
@@ -1188,6 +1268,16 @@ export default function App() {
       )}
 
       {newTypeNs !== null && <NewTypeDialog stable={newTypeNs} onCreate={onNewType} onCancel={() => setNewTypeNs(null)} />}
+      {deleteNs !== null && (
+        <DeleteNamespaceDialog
+          ns={deleteNs}
+          count={typesUnder(deleteNs).length}
+          onDeleteAll={() => onDeleteNamespace(deleteNs)}
+          onMoveUp={() => onMoveNamespaceUp(deleteNs)}
+          onCancel={() => setDeleteNs(null)}
+        />
+      )}
+      {movingType !== null && <MoveTypeDialog typeKey={movingType} onMove={onMoveType} onCancel={() => setMovingType(null)} />}
     </div>
   )
 }

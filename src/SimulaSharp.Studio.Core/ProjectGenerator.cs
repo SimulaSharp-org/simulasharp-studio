@@ -1,9 +1,12 @@
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.FindSymbols;
+using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Rename;
 using Microsoft.CodeAnalysis.Text;
+using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace SimulaSharp.Studio.Core;
 
@@ -49,6 +52,7 @@ public sealed class ProjectGenerator
                     "renameType" => await RenameType(solution, projectId, a, ct).ConfigureAwait(false),
                     "removeType" => await RemoveType(solution, projectId, a, ct).ConfigureAwait(false),
                     "renameNamespace" => await RenameNamespace(solution, projectId, a, ct).ConfigureAwait(false),
+                    "moveType" => await MoveType(solution, projectId, a, ct).ConfigureAwait(false),
                     _ => await ApplyToTypeBody(solution, projectId, a, ct).ConfigureAwait(false),
                 };
 
@@ -151,6 +155,69 @@ public sealed class ProjectGenerator
             if (current is null) return null;
         }
         return current;
+    }
+
+    /// <summary>Moves a type to another namespace: it is cut from its current file and re-emitted under the new
+    /// namespace, references get a <c>using &lt;newNs&gt;</c>, and the moved file keeps a <c>using &lt;oldNs&gt;</c> so its
+    /// own references to former siblings still resolve. The layout pass then files it in the target directory.</summary>
+    private static async Task<Solution> MoveType(Solution solution, ProjectId projectId, EditAction a, CancellationToken ct)
+    {
+        string oldNs = NamespaceOf(a.TypeKey);
+        string newNs = a.To ?? throw new InvalidOperationException("moveType needs a target namespace.");
+        if (newNs == oldNs) return solution;
+
+        var type = await ResolveType(solution, projectId, a.TypeKey, ct).ConfigureAwait(false);
+
+        // Resolve referencing documents up front — the symbol is about to be removed.
+        var referencingDocs = (await SymbolFinder.FindReferencesAsync(type, solution, ct).ConfigureAwait(false))
+            .SelectMany(r => r.Locations)
+            .Select(l => l.Document.Id)
+            .Distinct()
+            .ToList();
+
+        var syntaxRef = type.DeclaringSyntaxReferences.FirstOrDefault(r =>
+                            !r.SyntaxTree.FilePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase))
+                        ?? throw new InvalidOperationException($"No editable source for type '{type.Name}'.");
+        var oldDoc = solution.GetDocument(syntaxRef.SyntaxTree)!;
+        var oldRoot = (CompilationUnitSyntax)(await oldDoc.GetSyntaxRootAsync(ct).ConfigureAwait(false))!;
+        var typeDecl = (MemberDeclarationSyntax)await syntaxRef.GetSyntaxAsync(ct).ConfigureAwait(false);
+
+        // Cut the type from its current file (drop the file if it held only this type).
+        bool sole = !oldRoot.DescendantNodes().OfType<BaseTypeDeclarationSyntax>().Any(t => t != typeDecl);
+        solution = sole
+            ? solution.RemoveDocument(oldDoc.Id)
+            : solution.WithDocumentSyntaxRoot(oldDoc.Id, oldRoot.RemoveNode(typeDecl, SyntaxRemoveOptions.KeepNoTrivia)!);
+
+        // Emit the moved type as its own file under the new namespace (provisional path; the layout pass relocates it).
+        var usings = oldRoot.Usings;
+        if (oldNs.Length > 0 && !usings.Any(u => u.Name?.ToString() == oldNs))
+            usings = usings.Add(UsingDirective(ParseName(oldNs)));
+        var unit = CompilationUnit()
+            .WithUsings(usings)
+            .WithMembers(SingletonList<MemberDeclarationSyntax>(FileScopedNamespaceDeclaration(ParseName(newNs)).WithMembers(SingletonList(typeDecl))))
+            .NormalizeWhitespace();
+
+        string projectDir = Path.GetDirectoryName(solution.GetProject(projectId)!.FilePath)!;
+        string name = NameOf(a.TypeKey);
+        solution = solution.AddDocument(DocumentId.CreateNewId(projectId), name + ".cs",
+            SourceText.From(unit.ToFullString(), Encoding.UTF8), filePath: Path.Combine(projectDir, newNs + "." + name + ".cs"));
+
+        // Every referencing file needs `using newNs;` now that the type left oldNs.
+        foreach (var docId in referencingDocs)
+            if (docId != oldDoc.Id)
+                solution = await EnsureUsing(solution, docId, newNs, ct).ConfigureAwait(false);
+
+        return solution;
+    }
+
+    private static async Task<Solution> EnsureUsing(Solution solution, DocumentId docId, string ns, CancellationToken ct)
+    {
+        if (solution.GetDocument(docId) is not { } doc) return solution;
+        if (await doc.GetSyntaxRootAsync(ct).ConfigureAwait(false) is not CompilationUnitSyntax root) return solution;
+        if (root.Usings.Any(u => u.Name?.ToString() == ns)) return solution;
+        var withUsing = root.AddUsings(UsingDirective(ParseName(ns)).WithAdditionalAnnotations(Formatter.Annotation));
+        var formatted = await Formatter.FormatAsync(doc.WithSyntaxRoot(withUsing), Formatter.Annotation, cancellationToken: ct).ConfigureAwait(false);
+        return formatted.Project.Solution;
     }
 
     private static async Task<INamedTypeSymbol> ResolveType(Solution solution, ProjectId projectId, string typeKey, CancellationToken ct)
