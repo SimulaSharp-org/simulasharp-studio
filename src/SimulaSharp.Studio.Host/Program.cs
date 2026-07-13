@@ -84,4 +84,7 @@ internal sealed class StudioHub : Hub
 
     /// <summary>Replays the SPA's pending edit journal back into the project's source; returns the re-derived IR.</summary>
     public Task<GenerateResult> Generate(string path, EditAction[] actions) => new ProjectGenerator().ApplyAsync(path, actions);
+
+    /// <summary>Reads the project's *.simassembly.yaml topology files for the topology editor.</summary>
+    public Task<IReadOnlyList<AssemblyModel>> OpenAssemblies(string path) => new AssemblyReader().ReadAsync(path);
 }

@@ -1,0 +1,27 @@
+Simulator:
+  Name: DemoSim
+
+  Services:
+    - Name: Environment
+      Type: DemoSim.Services.Environment
+
+  Sites:
+    - Name: Bus
+      Models:
+        - Name: Eps
+          Type: DemoSim.Power.Eps
+          Models:
+            - Batteries:
+                - Name: Bat1
+                  Type: DemoSim.Power.Battery
+                  Config: { CapacityWh: 2000 }
+                - Name: Bat2
+                  Type: DemoSim.Power.Battery
+          Refs:
+            - Consumers:
+                - DemoSim.Heater
+          Deps:
+            - Environment: Environment
+        - Name: Heater
+          Type: DemoSim.Power.Heater
+          Config: { RatedW: 50 }

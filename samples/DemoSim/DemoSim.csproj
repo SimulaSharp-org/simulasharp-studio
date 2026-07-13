@@ -15,4 +15,11 @@
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <!-- SimAssembly items must precede the targets import so @(SimAssembly) is populated when it maps to AdditionalFiles
+       (a NuGet consumer gets the import automatically, after the project body). -->
+  <ItemGroup>
+    <SimAssembly Include="DemoSim.simassembly.yaml" />
+  </ItemGroup>
+  <Import Project="..\..\..\CodeGen\build\SimulaSharp.CodeGen.targets" />
+
 </Project>
