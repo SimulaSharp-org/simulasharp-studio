@@ -211,6 +211,14 @@ type TreeProps = {
   renamingNs: string | null
   onRenameNamespace: (oldNs: string, leaf: string) => void
   onRenameNsCancel: () => void
+  onTreeDrop: (dragged: { kind: 'type' | 'ns'; id: string }, targetNs: string) => void
+}
+
+const DRAG_MIME = 'application/studio-tree'
+const startDrag = (e: React.DragEvent, kind: 'type' | 'ns', id: string) => {
+  e.stopPropagation()
+  e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ kind, id }))
+  e.dataTransfer.effectAllowed = 'move'
 }
 
 function NsFolder({ node, depth, ns, ...p }: { node: NsNode; depth: number; ns: string } & TreeProps) {
@@ -218,13 +226,30 @@ function NsFolder({ node, depth, ns, ...p }: { node: NsNode; depth: number; ns: 
   const folders = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name))
   const types = [...node.types].sort(byKindThenName)
   const renaming = ns === p.renamingNs
+  const [dropping, setDropping] = useState(false)
   return (
     <div>
       <div
-        className="row folder"
+        className={'row folder' + (dropping ? ' drop-target' : '')}
         style={{ paddingLeft: depth * 14 + 6 }}
         onClick={() => !renaming && setOpen((o) => !o)}
         onContextMenu={(e) => p.onContext(e, 'ns', ns)}
+        draggable={!renaming}
+        onDragStart={(e) => startDrag(e, 'ns', ns)}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes(DRAG_MIME)) {
+            e.preventDefault()
+            setDropping(true)
+          }
+        }}
+        onDragLeave={() => setDropping(false)}
+        onDrop={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          setDropping(false)
+          const raw = e.dataTransfer.getData(DRAG_MIME)
+          if (raw) p.onTreeDrop(JSON.parse(raw), ns)
+        }}
       >
         <span className="chev">{open ? '▾' : '▸'}</span>
         <span className="folder-badge">N</span>
@@ -268,6 +293,8 @@ function TypeRow({ t, depth, onSelect, selectedKey, onContext, renamingKey, onRe
       style={{ paddingLeft: depth * 14 + 24 }}
       onClick={() => !renaming && onSelect(k)}
       onContextMenu={(e) => onContext(e, 'type', k)}
+      draggable={!renaming}
+      onDragStart={(e) => startDrag(e, 'type', k)}
     >
       <span className={'badge k-' + t.kind} title={t.kind}>
         {shortKind(t.kind)}
@@ -1076,6 +1103,28 @@ export default function App() {
     if (selectedKey === typeKey) setSelectedKey(newKey)
   }
 
+  // Reparent a whole namespace under another (drag a folder onto a folder): its subtree's prefix is rewritten.
+  const onReparentNamespace = (sourceNs: string, targetNs: string) => {
+    if (targetNs === sourceNs || targetNs.startsWith(sourceNs + '.')) return // into itself / a descendant → cycle
+    const leaf = sourceNs.includes('.') ? sourceNs.slice(sourceNs.lastIndexOf('.') + 1) : sourceNs
+    const newBase = targetNs ? targetNs + '.' + leaf : leaf
+    if (newBase === sourceNs) return // already there
+    const victims = typesUnder(sourceNs)
+    if (!victims.length) return
+    dispatch({
+      op: 'bundle',
+      label: `Move ${sourceNs} → ${newBase}`,
+      actions: victims.map((t) => ({ op: 'moveType', typeKey: key(t), to: newBase + t.namespace.slice(sourceNs.length) })),
+    })
+    if (selectedKey && victims.some((t) => key(t) === selectedKey))
+      setSelectedKey(newBase + nsOf(selectedKey).slice(sourceNs.length) + '.' + nameOf(selectedKey))
+  }
+
+  const onTreeDrop = (dragged: { kind: 'type' | 'ns'; id: string }, targetNs: string) => {
+    if (dragged.kind === 'type') onMoveType(dragged.id, targetNs)
+    else onReparentNamespace(dragged.id, targetNs)
+  }
+
   const onNewType = (typeKey: string, kind: string) => {
     setNewTypeNs(null)
     if (working?.types.some((t) => key(t) === typeKey)) return // collision
@@ -1200,6 +1249,7 @@ export default function App() {
                     renamingNs={renamingNs}
                     onRenameNamespace={onRenameNamespace}
                     onRenameNsCancel={onRenameNsCancel}
+                    onTreeDrop={onTreeDrop}
                   />
                 ))}
               {[...root.types].sort(byKindThenName).map((t) => (
@@ -1216,6 +1266,7 @@ export default function App() {
                   renamingNs={renamingNs}
                   onRenameNamespace={onRenameNamespace}
                   onRenameNsCancel={onRenameNsCancel}
+                  onTreeDrop={onTreeDrop}
                 />
               ))}
             </div>
