@@ -52,6 +52,10 @@ public sealed class ProjectGenerator
                     _ => await ApplyToTypeBody(solution, projectId, a, ct).ConfigureAwait(false),
                 };
 
+            // Normalize the physical layout (one type per file, directory mirrors namespace) before verifying, so the
+            // committed layout is what we compile-check.
+            solution = await LayoutNormalizer.NormalizeAsync(solution, projectId, ct).ConfigureAwait(false);
+
             // Verify: recompile and refuse to write only if the edit *introduced* errors — a pre-existing error (the
             // project may be mid-edit) shouldn't block an unrelated change. Compared by id+file+message so a shifted
             // line number doesn't read as a new error.
@@ -93,10 +97,8 @@ public sealed class ProjectGenerator
         string dir = Path.GetDirectoryName(project.FilePath)
                      ?? throw new InvalidOperationException("The project has no directory to add a file to.");
         string ns = NamespaceOf(a.TypeKey), name = NameOf(a.TypeKey);
-        string filePath = Path.Combine(dir, name + ".cs");
-        if (File.Exists(filePath) || project.Documents.Any(d => string.Equals(d.FilePath, filePath, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException($"A file '{name}.cs' already exists — rename the type or move the file first.");
-
+        // A provisional, per-key-unique path; the layout-normalization pass relocates it to the namespace's directory.
+        string filePath = Path.Combine(dir, a.TypeKey + ".cs");
         var text = SourceText.From(TypeSkeleton(ns, name, a.Kind ?? "Other"), Encoding.UTF8);
         return solution.AddDocument(DocumentId.CreateNewId(projectId), name + ".cs", text, filePath: filePath);
     }
@@ -185,18 +187,36 @@ public sealed class ProjectGenerator
 
         foreach (var id in changes.GetRemovedDocuments())
             if (originalSolution.GetDocument(id)?.FilePath is { } path && File.Exists(path))
+            {
                 File.Delete(path);
+                PruneEmptyDirs(Path.GetDirectoryName(path), Path.GetDirectoryName(originalSolution.GetProject(projectId)!.FilePath));
+            }
 
         foreach (var id in changes.GetAddedDocuments().Concat(changes.GetChangedDocuments()))
         {
             var doc = solution.GetDocument(id)!;
             if (doc.FilePath is not { } filePath) continue;
+            Directory.CreateDirectory(Path.GetDirectoryName(filePath)!); // namespace subdirectory may be new
             var text = await doc.GetTextAsync(ct).ConfigureAwait(false);
             // LF, matching the repo convention.
             await File.WriteAllTextAsync(filePath, text.ToString().Replace("\r\n", "\n"), text.Encoding ?? Encoding.UTF8, ct)
                 .ConfigureAwait(false);
         }
     }
+
+    /// <summary>Removes now-empty directories walking up from <paramref name="dir"/>, stopping at the project root.</summary>
+    private static void PruneEmptyDirs(string? dir, string? projectDir)
+    {
+        while (dir is not null && projectDir is not null && !PathEquals(dir, projectDir)
+               && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+        {
+            Directory.Delete(dir);
+            dir = Path.GetDirectoryName(dir);
+        }
+    }
+
+    private static bool PathEquals(string a, string b) =>
+        string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
     private static string NamespaceOf(string typeKey) { int d = typeKey.LastIndexOf('.'); return d < 0 ? "" : typeKey[..d]; }
     private static string NameOf(string typeKey) { int d = typeKey.LastIndexOf('.'); return d < 0 ? typeKey : typeKey[(d + 1)..]; }
