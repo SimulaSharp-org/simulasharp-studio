@@ -28,6 +28,15 @@ type DesignableType = {
 }
 type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
+// ── Assembly topology (read-only for now) ───────────────────────────────────────
+type DepBinding = { member: string; service: string }
+type ReferenceBinding = { name: string; targets: string[] }
+type Container = { name: string; children: ModelInstance[] }
+type ModelInstance = { name: string; type: string; config: Record<string, string>; containers: Container[]; refs: ReferenceBinding[]; deps: DepBinding[] }
+type ServiceInstance = { name: string; type: string; config: Record<string, string>; deps: DepBinding[] }
+type SiteInstance = { name: string; maxEvents: number; models: ModelInstance[] }
+type AssemblyModel = { name: string; missionStart: string | null; services: ServiceInstance[]; sites: SiteInstance[]; path: string }
+
 type NsNode = { name: string; children: Map<string, NsNode>; types: DesignableType[] }
 
 // The Photino native-shell bridge (present only inside the desktop webview, not a plain browser).
@@ -897,6 +906,54 @@ function placeSide(side: Side, i: number, n: number) {
   }
 }
 
+// ── Topology view (top level: services | sites) ────────────────────────────────
+
+const shortType = (t: string) => t.split('.').pop() ?? t
+
+function TopologyView({ assemblies }: { assemblies: AssemblyModel[] | null }) {
+  if (assemblies === null) return <div className="topo-empty">Loading topology…</div>
+  if (!assemblies.length) return <div className="topo-empty">No assemblies (*.simassembly.yaml) registered in this project.</div>
+  return (
+    <div className="topo">
+      {assemblies.map((a) => (
+        <div key={a.path} className="topo-asm">
+          <div className="topo-asm-head">
+            <span className="topo-sim">
+              {a.name}
+              <em>Simulator</em>
+            </span>
+            <span className="topo-path">{a.path.split(/[\\/]/).pop()}</span>
+          </div>
+          <div className="topo-cols">
+            <section className="topo-col">
+              <div className="topo-col-title">Services · {a.services.length}</div>
+              {a.services.map((s) => (
+                <div key={s.name} className="topo-card service">
+                  <span className="topo-card-name">{s.name}</span>
+                  <span className="topo-card-type">{shortType(s.type)}</span>
+                  <button className="topo-del" title="delete service">×</button>
+                </div>
+              ))}
+              {!a.services.length && <div className="topo-col-empty">no services</div>}
+            </section>
+
+            <section className="topo-col">
+              <div className="topo-col-title">Sites · {a.sites.length}</div>
+              {a.sites.map((site) => (
+                <div key={site.name} className="topo-card site" title="open site">
+                  <span className="topo-card-name">{site.name}</span>
+                  <button className="topo-del" title="delete site">×</button>
+                </div>
+              ))}
+              {!a.sites.length && <div className="topo-col-empty">no sites</div>}
+            </section>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -910,6 +967,8 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [genMsg, setGenMsg] = useState('')
+  const [mode, setMode] = useState<'design' | 'topology'>('design')
+  const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // null = not yet loaded
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
@@ -933,12 +992,25 @@ export default function App() {
     setJournal([])
     setRedo([])
     setRev(0)
+    setAssemblies(null) // re-fetched lazily when the Topology tab is opened
     try {
       setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
     } catch (e) {
       setError(String(e))
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Load the assembly topology lazily the first time the Topology tab is shown.
+  const showTopology = async () => {
+    setMode('topology')
+    if (assemblies !== null || !conn.current || !baseline) return
+    try {
+      setAssemblies(await conn.current.invoke<AssemblyModel[]>('OpenAssemblies', baseline.path))
+    } catch (e) {
+      setError(String(e))
+      setAssemblies([])
     }
   }
 
@@ -1190,6 +1262,16 @@ export default function App() {
         <strong>SimulaSharp.Studio</strong>
         <span className="status">{connected ? 'backend connected' : 'connecting…'}</span>
         {baseline && (
+          <span className="mode-tabs">
+            <button className={mode === 'design' ? 'active' : ''} onClick={() => setMode('design')}>
+              Design
+            </button>
+            <button className={mode === 'topology' ? 'active' : ''} onClick={showTopology}>
+              Topology
+            </button>
+          </span>
+        )}
+        {baseline && mode === 'design' && (
           <span className="edits">
             <span className={'pending' + (journal.length ? ' active' : '')}>
               {journal.length ? `${journal.length} pending change${journal.length > 1 ? 's' : ''}` : 'no changes'}
@@ -1211,6 +1293,13 @@ export default function App() {
         )}
       </header>
       <div className="body">
+        {mode === 'topology' ? (
+          <main className="topo-main">
+            {error && <div className="error">{error}</div>}
+            <TopologyView assemblies={assemblies} />
+          </main>
+        ) : (
+        <>
         <aside className="sidebar">
           <div className="open-row">
             <button
@@ -1289,6 +1378,8 @@ export default function App() {
             <Controls showInteractive={false} />
           </ReactFlow>
         </main>
+        </>
+        )}
       </div>
 
       {menu && (

@@ -15,6 +15,78 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   border-bottom: 1px solid #1e293b;
 }
 .topbar .status { opacity: 0.7; font-size: 14px; }
+.topbar .mode-tabs { display: inline-flex; gap: 2px; background: #0e1526; border: 1px solid #1e293b; border-radius: 6px; padding: 2px; }
+.topbar .mode-tabs button {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+}
+.topbar .mode-tabs button.active { background: #1d4ed8; color: #fff; }
+
+/* topology view — top level: services | sites */
+.topo-main { flex: 1; min-height: 0; overflow: auto; padding: 32px 24px; }
+.topo-empty { opacity: 0.6; padding: 24px; text-align: center; }
+.topo-asm { max-width: 760px; margin: 0 auto 40px; }
+.topo-asm-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  padding-bottom: 20px;
+}
+.topo-sim { font-size: 18px; font-weight: 700; }
+.topo-sim em { font-style: normal; font-weight: 400; opacity: 0.55; }
+.topo-path { font-size: 12px; opacity: 0.4; }
+
+.topo-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+.topo-col { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.topo-col-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+.topo-col-empty { font-size: 13px; opacity: 0.4; font-style: italic; }
+
+.topo-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 240px;
+  padding: 10px 12px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0e1526;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.topo-card.service { border-left: 3px solid #14532d; }
+.topo-card.site { border-left: 3px solid #1e3a8a; cursor: pointer; }
+.topo-card.site:hover { border-color: #2563eb; background: #131c30; }
+.topo-card-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.topo-card-type { font-size: 11px; opacity: 0.5; }
+.topo-del {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 15px;
+  opacity: 0;
+}
+.topo-card:hover .topo-del { opacity: 1; }
+.topo-del:hover { background: #7f1d1d; color: #fecaca; }
 .topbar .edits { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .topbar .pending { opacity: 0.5; }
 .topbar .pending.active { opacity: 1; color: #fcd34d; }
