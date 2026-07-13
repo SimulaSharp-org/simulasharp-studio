@@ -90,4 +90,18 @@ internal sealed class StudioHub : Hub
 
     /// <summary>Writes the edited topology models back to their *.simassembly.yaml files.</summary>
     public Task<TopologyWriteResult> WriteAssemblies(AssemblyModel[] assemblies) => new TopologyGenerator().WriteAsync(assemblies);
+
+    // ── Snapshots (baseline IR + edit journal, persisted under the project's .studio/snapshots/) ──
+
+    /// <summary>Lists the saved snapshots for a project (headers only), newest first.</summary>
+    public Task<IReadOnlyList<SnapshotHeader>> ListSnapshots(string path) => new SnapshotStore().ListAsync(path);
+
+    /// <summary>Persists a snapshot (opaque frontend JSON); re-saving the same id overwrites its file.</summary>
+    public Task<SnapshotSaveResult> SaveSnapshot(string path, string snapshotJson) => new SnapshotStore().SaveAsync(path, snapshotJson);
+
+    /// <summary>Returns the raw JSON of a snapshot by id, or null if it no longer exists.</summary>
+    public Task<string?> LoadSnapshot(string path, string id) => new SnapshotStore().LoadAsync(path, id);
+
+    /// <summary>Deletes a snapshot by id.</summary>
+    public Task DeleteSnapshot(string path, string id) => new SnapshotStore().DeleteAsync(path, id);
 }

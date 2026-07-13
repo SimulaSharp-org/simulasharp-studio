@@ -205,6 +205,50 @@ const TOPO_OPS = new Set([
 type JournalEvent = Entry | TopoAction
 const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
 
+// ── Snapshots (baseline IR + edit journal, persisted under the project's .studio/snapshots/) ────────────────────────
+// One snapshot = the implicit baseline (design IR + every assembly's topology) plus the pending edit journal, so a
+// session survives a reload/restart. On load we re-derive the live IR and abort if its hash differs (drift) — this
+// sprint the journal's name/path-targeted actions only replay safely onto the exact baseline they were captured against.
+type SnapshotHeader = { id: string; label: string; savedUtc?: string; baselineCapturedUtc?: string }
+type Snapshot = {
+  schema: number
+  id: string
+  label: string
+  baselineCapturedUtc: string
+  savedUtc: string
+  baseline: { hash: string; ir: { project: ProjectModel; assemblies: AssemblyModel[] } }
+  journal: JournalEvent[]
+}
+
+const snapId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+
+// A structural, order-independent stringify: object keys are sorted AND array elements are sorted by their own
+// canonical form. Roslyn returns a type's interfaces/members in an unstable order across opens, so an order-sensitive
+// hash would flip on that noise and report false drift; a multiset hash is immune to it (reordering isn't real drift).
+const canonical = (v: unknown): string => {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+  if (Array.isArray(v)) return '[' + v.map(canonical).sort().join(',') + ']'
+  const o = v as Record<string, unknown>
+  return '{' + Object.keys(o).sort().map((k) => JSON.stringify(k) + ':' + canonical(o[k])).join(',') + '}'
+}
+// FNV-1a 64-bit (two seeds) over the canonical form → hex. Used only for drift equality, not crypto.
+const hashIr = (project: ProjectModel, assemblies: AssemblyModel[]): string => {
+  const s = canonical({ project, assemblies })
+  let h1 = 0x811c9dc5
+  let h2 = 0xc2b2ae35
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 0x01000193)
+    h2 = Math.imul(h2 ^ c, 0x85ebca77)
+  }
+  return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0')
+}
+const fmtUtc = (s?: string) => {
+  if (!s) return ''
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? s : d.toLocaleString()
+}
+
 const uniqueName = (base: string, taken: Set<string>) => {
   let n = base
   for (let i = 2; taken.has(n); i++) n = base + i
@@ -1814,6 +1858,80 @@ function TopologyView({
   )
 }
 
+// Topbar snapshot controls: a chip for the snapshot being worked from (if any) + a Save button that opens a label field.
+function SnapshotControls({ current, onSave }: { current: { id: string; label: string } | null; onSave: (label: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [label, setLabel] = useState('')
+  const commit = () => {
+    const l = label.trim()
+    if (!l) return
+    onSave(l)
+    setEditing(false)
+  }
+  if (editing)
+    return (
+      <span className="snap-save">
+        <input
+          autoFocus
+          placeholder="snapshot label"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+            else if (e.key === 'Escape') setEditing(false)
+          }}
+        />
+        <button onClick={commit} disabled={!label.trim()}>
+          Save
+        </button>
+        <button className="snap-x" onClick={() => setEditing(false)}>
+          ✕
+        </button>
+      </span>
+    )
+  return (
+    <span className="snap-ctl">
+      {current && <span className="snap-chip" title="working from this snapshot; Generate re-saves it">◆ {current.label}</span>}
+      <button
+        onClick={() => {
+          setLabel(current?.label ?? '')
+          setEditing(true)
+        }}
+        title="Save a snapshot (baseline + pending journal)"
+      >
+        Save Snapshot
+      </button>
+    </span>
+  )
+}
+
+// The on-open prompt when a project already has saved snapshots: continue one, or start fresh.
+function SnapshotPrompt({ snapshots, onContinue, onFresh }: { snapshots: SnapshotHeader[]; onContinue: (id: string) => void; onFresh: () => void }) {
+  return (
+    <div className="snap-backdrop" onClick={onFresh}>
+      <div className="snap-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="snap-dialog-head">
+          {snapshots.length} snapshot{snapshots.length > 1 ? 's' : ''} for this project
+        </div>
+        <div className="snap-dialog-sub">Continue one, or start a fresh session.</div>
+        <ul className="snap-dialog-list">
+          {snapshots.map((s) => (
+            <li key={s.id}>
+              <button onClick={() => onContinue(s.id)}>
+                <span className="snap-dialog-label">{s.label || '(unlabeled)'}</span>
+                <span className="snap-dialog-when">{fmtUtc(s.savedUtc)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <button className="snap-fresh" onClick={onFresh}>
+          Start fresh
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── App ────────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1831,6 +1949,10 @@ export default function App() {
   const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // topology baseline; null = not yet loaded
   const [openSite, setOpenSite] = useState<{ asmPath: string; siteName: string } | null>(null) // drilled-into site
   const [openRefs, setOpenRefs] = useState<{ asmPath: string } | null>(null) // open references view (per assembly)
+  const [snapshots, setSnapshots] = useState<SnapshotHeader[]>([]) // saved snapshots for the open project
+  const [currentSnapshot, setCurrentSnapshot] = useState<{ id: string; label: string } | null>(null) // one being worked from
+  const [baselineUtc, setBaselineUtc] = useState('') // when the current baseline IR was captured (open / last Generate)
+  const [snapPrompt, setSnapPrompt] = useState(false) // show the continue/fresh prompt on open
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
@@ -1881,11 +2003,25 @@ export default function App() {
     setJournal([])
     setRedo([])
     setRev(0)
-    setAssemblies(null) // re-fetched lazily when the Topology tab is opened
+    setAssemblies(null)
     setOpenSite(null)
     setOpenRefs(null)
+    setCurrentSnapshot(null)
+    setSnapshots([])
+    setSnapPrompt(false)
+    const path = p.trim()
     try {
-      setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
+      // Eager-load both the design IR and the topology so the baseline captured here is complete (snapshots hash both).
+      setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', path))
+      try {
+        setAssemblies(await conn.current.invoke<AssemblyModel[]>('OpenAssemblies', path))
+      } catch {
+        setAssemblies([]) // a project with no/broken assemblies still opens for design editing
+      }
+      setBaselineUtc(new Date().toISOString())
+      const snaps = await conn.current.invoke<SnapshotHeader[]>('ListSnapshots', path)
+      setSnapshots(snaps)
+      setSnapPrompt(snaps.length > 0)
     } catch (e) {
       setError(String(e))
     } finally {
@@ -1893,7 +2029,7 @@ export default function App() {
     }
   }
 
-  // Load the assembly topology lazily the first time the Topology tab is shown.
+  // Assemblies are eager-loaded on open now, so this just switches the tab (kept as a guarded refetch fallback).
   const showTopology = async () => {
     setMode('topology')
     if (assemblies !== null || !conn.current || !baseline) return
@@ -1902,6 +2038,58 @@ export default function App() {
     } catch (e) {
       setError(String(e))
       setAssemblies([])
+    }
+  }
+
+  // ── Snapshots ─────────────────────────────────────────────────────────────────
+
+  // Save the current baseline IR + pending journal under a label (re-saving the current snapshot overwrites it).
+  const saveSnapshot = async (label: string) => {
+    if (!conn.current || !baseline || !assemblies) return
+    const savedUtc = new Date().toISOString()
+    const snap: Snapshot = {
+      schema: 1,
+      id: currentSnapshot?.id ?? snapId(),
+      label,
+      baselineCapturedUtc: baselineUtc || savedUtc,
+      savedUtc,
+      baseline: { hash: hashIr(baseline, assemblies), ir: { project: baseline, assemblies } },
+      journal,
+    }
+    try {
+      const res = await conn.current.invoke<{ id: string; path: string }>('SaveSnapshot', baseline.path, JSON.stringify(snap))
+      setCurrentSnapshot({ id: res.id, label })
+      setSnapshots(await conn.current.invoke<SnapshotHeader[]>('ListSnapshots', baseline.path))
+      setGenMsg('Snapshot saved ✓')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  // Continue a saved snapshot: re-hash the live baseline and abort on drift (this sprint the journal only replays onto
+  // the exact IR it was captured against); otherwise adopt its journal.
+  const continueSnapshot = async (id: string) => {
+    setSnapPrompt(false)
+    if (!conn.current || !baseline || !assemblies) return
+    try {
+      const raw = await conn.current.invoke<string | null>('LoadSnapshot', baseline.path, id)
+      if (!raw) {
+        setError('That snapshot could not be found.')
+        return
+      }
+      const snap = JSON.parse(raw) as Snapshot
+      if (snap.baseline.hash !== hashIr(baseline, assemblies)) {
+        setError(`Can't continue "${snap.label}": the project's design/topology changed since this snapshot was captured. Start fresh instead.`)
+        return
+      }
+      setJournal(snap.journal)
+      setRedo([])
+      setRev((r) => r + 1)
+      setCurrentSnapshot({ id: snap.id, label: snap.label })
+      setBaselineUtc(snap.baselineCapturedUtc)
+      setGenMsg(`Continuing "${snap.label}" · ${snap.journal.length} change${snap.journal.length === 1 ? '' : 's'}`)
+    } catch (e) {
+      setError(String(e))
     }
   }
 
@@ -2085,6 +2273,26 @@ export default function App() {
       setRedo([])
       setRev((r) => r + 1)
       setGenMsg('Generated ✓')
+
+      // The project now embodies the journal — capture a fresh baseline and, if working from a snapshot, re-save it
+      // reset to {new baseline, []} at the same id (design: post-Generate the snapshot resets to the new baseline).
+      const nb = designActions.length && newBaseline ? newBaseline : baseline
+      const na = topoChanged && workingAssemblies ? workingAssemblies : assemblies
+      const utc = new Date().toISOString()
+      setBaselineUtc(utc)
+      if (currentSnapshot && nb && na) {
+        const snap: Snapshot = {
+          schema: 1,
+          id: currentSnapshot.id,
+          label: currentSnapshot.label,
+          baselineCapturedUtc: utc,
+          savedUtc: utc,
+          baseline: { hash: hashIr(nb, na), ir: { project: nb, assemblies: na } },
+          journal: [],
+        }
+        await conn.current.invoke('SaveSnapshot', nb.path, JSON.stringify(snap))
+        setSnapshots(await conn.current.invoke<SnapshotHeader[]>('ListSnapshots', nb.path))
+      }
     } catch (e) {
       setGenMsg('')
       setError(String(e))
@@ -2310,10 +2518,12 @@ export default function App() {
             <button className="gen" onClick={generate} disabled={!journal.length} title="Write all pending changes back (code + topology)">
               Generate
             </button>
+            <SnapshotControls current={currentSnapshot} onSave={saveSnapshot} />
             {genMsg && <span className="gen-msg">{genMsg}</span>}
           </span>
         )}
       </header>
+      {snapPrompt && snapshots.length > 0 && <SnapshotPrompt snapshots={snapshots} onContinue={continueSnapshot} onFresh={() => setSnapPrompt(false)} />}
       <div className="body">
         {mode === 'topology' ? (
           drilledRefs ? (

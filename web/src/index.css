@@ -375,6 +375,87 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .topbar .edits button.gen:hover:not(:disabled) { background: #1e40af; }
 .topbar .gen-msg { font-size: 12px; color: #86efac; }
 
+/* snapshot controls (topbar) */
+.snap-ctl, .snap-save { display: inline-flex; align-items: center; gap: 6px; }
+.snap-chip {
+  font-size: 12px;
+  color: #a5f3fc;
+  background: #082f3a;
+  border: 1px solid #0e7490;
+  border-radius: 4px;
+  padding: 3px 8px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snap-save input {
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 3px 7px;
+  width: 150px;
+}
+.topbar .edits .snap-x { padding: 4px 8px; }
+
+/* on-open snapshot prompt */
+.snap-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(2, 6, 12, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.snap-dialog {
+  width: 420px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0e1526;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.snap-dialog-head { font-size: 16px; font-weight: 700; }
+.snap-dialog-sub { font-size: 13px; opacity: 0.6; margin: 4px 0 14px; }
+.snap-dialog-list { list-style: none; margin: 0 0 14px; padding: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.snap-dialog-list button {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font: inherit;
+  padding: 8px 12px;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  background: #172033;
+  color: #dbeafe;
+  cursor: pointer;
+  text-align: left;
+}
+.snap-dialog-list button:hover { background: #1e293b; border-color: #38bdf8; }
+.snap-dialog-label { font-weight: 600; }
+.snap-dialog-when { font-size: 11px; opacity: 0.5; white-space: nowrap; }
+.snap-fresh {
+  align-self: flex-end;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 16px;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  background: #172033;
+  color: #93c5fd;
+  cursor: pointer;
+}
+.snap-fresh:hover { background: #1e293b; }
+
 .body { flex: 1; min-height: 0; display: flex; }
 
 .sidebar {
