@@ -49,6 +49,10 @@ type TopoAction =
   | { op: 'removeService'; asm: string; name: string }
   | { op: 'renameService'; asm: string; from: string; to: string }
   | { op: 'setServiceConfig'; asm: string; name: string; key: string; value: string }
+  // instance-tree edits — path is the dotted instance path (Sim.Root.Child…, containers/sites transparent)
+  | { op: 'addInstance'; asm: string; parentPath: string; container: string; name: string; type: string }
+  | { op: 'removeInstance'; asm: string; path: string }
+  | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
 
 const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
   models.map((m) => ({
@@ -85,8 +89,39 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
       }
     case 'setServiceConfig':
       return { ...asm, services: asm.services.map((s) => (s.name === a.name ? { ...s, config: { ...s.config, [a.key]: a.value } } : s)) }
+    case 'addInstance': {
+      const segs = pathSegs(a.parentPath, asm.name)
+      const child: ModelInstance = { name: a.name, type: a.type, config: {}, containers: [], refs: [], deps: [] }
+      const add = (m: ModelInstance): ModelInstance =>
+        m.containers.some((c) => c.name === a.container)
+          ? { ...m, containers: m.containers.map((c) => (c.name === a.container ? { ...c, children: [...c.children, child] } : c)) }
+          : { ...m, containers: [...m.containers, { name: a.container, children: [child] }] }
+      return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, add) })) }
+    }
+    case 'removeInstance':
+      return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: removeInstanceAt(s.models, pathSegs(a.path, asm.name)) })) }
+    case 'setInstanceConfig': {
+      const segs = pathSegs(a.path, asm.name)
+      const set = (m: ModelInstance): ModelInstance => ({ ...m, config: { ...m.config, [a.key]: a.value } })
+      return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
+    }
   }
 }
+
+// Instance path helpers: segments are the instance names below the simulator (containers/sites are transparent).
+const pathSegs = (path: string, asmName: string) => path.slice(asmName.length + 1).split('.').filter(Boolean)
+
+const mapInstanceAt = (models: ModelInstance[], segs: string[], fn: (m: ModelInstance) => ModelInstance): ModelInstance[] =>
+  models.map((m) => {
+    if (m.name !== segs[0]) return m
+    if (segs.length === 1) return fn(m)
+    return { ...m, containers: m.containers.map((c) => ({ ...c, children: mapInstanceAt(c.children, segs.slice(1), fn) })) }
+  })
+
+const removeInstanceAt = (models: ModelInstance[], segs: string[]): ModelInstance[] =>
+  segs.length === 1
+    ? models.filter((m) => m.name !== segs[0])
+    : models.map((m) => (m.name === segs[0] ? { ...m, containers: m.containers.map((c) => ({ ...c, children: removeInstanceAt(c.children, segs.slice(1)) })) } : m))
 
 const randomName = () => {
   const alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -102,6 +137,7 @@ const applyTopo = (assemblies: AssemblyModel[], a: TopoAction): AssemblyModel[] 
 const TOPO_OPS = new Set([
   'renameSimulator', 'addSite', 'removeSite', 'renameSite', 'setSiteMaxEvents',
   'addService', 'removeService', 'renameService', 'setServiceConfig',
+  'addInstance', 'removeInstance', 'setInstanceConfig',
 ])
 type JournalEvent = Entry | TopoAction
 const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
@@ -983,23 +1019,39 @@ function placeSide(side: Side, i: number, n: number) {
 
 // ── Topology view (top level: services | sites) + site drill-in ─────────────────
 
-// A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges and shows Config.
+type SiteCtx = {
+  asmPath: string
+  paramsOf: (t: string) => string[]
+  containersOf: (t: string) => { name: string; elementType: string }[]
+  candidatesOf: (t: string) => { fqn: string; label: string }[]
+  onAddInstance: (asm: string, parentPath: string, container: string, name: string, type: string) => void
+  onRemoveInstance: (asm: string, path: string) => void
+  onSetInstanceConfig: (asm: string, path: string, key: string, value: string) => void
+}
+
+// A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges and shows its
+// editable Config. Removable instances (a root, or a focused node's child) carry a round delete.
 function TopoInstanceNode({ data }: NodeProps) {
-  const d = data as { inst: ModelInstance; focused: boolean }
+  const d = data as { inst: ModelInstance; focused: boolean; path: string; params: string[]; removable: boolean; ctx: SiteCtx }
   const inst = d.inst
-  const config = Object.entries(inst.config)
   return (
     <div className={'topo-fnode inst' + (d.focused ? ' focused' : '')}>
       <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
       <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
+      {d.removable && (
+        <button className="topo-del round" title="delete instance" onClick={(e) => { e.stopPropagation(); d.ctx.onRemoveInstance(d.ctx.asmPath, d.path) }}>
+          ×
+        </button>
+      )}
       <div className="topo-fnode-head">{inst.name}</div>
       <div className="topo-fnode-type">{inst.type}</div>
-      {d.focused && config.length > 0 && (
-        <div className="topo-props">
-          {config.map(([k, v]) => (
-            <span key={k} className="topo-chip">
-              {k} = {v}
-            </span>
+      {d.focused && d.params.length > 0 && (
+        <div className="topo-params" onClick={(e) => e.stopPropagation()}>
+          {d.params.map((k) => (
+            <div key={k} className="topo-param">
+              <span className="topo-param-k">{k}</span>
+              <EditableText className="topo-param-v" value={inst.config[k] ?? ''} placeholder="default" onCommit={(v) => d.ctx.onSetInstanceConfig(d.ctx.asmPath, d.path, k, v)} />
+            </div>
           ))}
         </div>
       )}
@@ -1007,75 +1059,123 @@ function TopoInstanceNode({ data }: NodeProps) {
   )
 }
 
-// A container junction: a small labelled node between a focused instance and that container's children (React Flow
-// edges are point-to-point, so a container "fans" via this node rather than a single branching edge).
+// A container junction (React Flow edges are point-to-point, so a container fans via this node). Its "+" opens an
+// add-instance form: a name and a type (dropdown of models assignable to the container's [Contains<T>] element type).
 function TopoContainerNode({ data }: NodeProps) {
-  const name = (data as { name: string }).name
+  const d = data as { name: string; parentPath: string; candidates: { fqn: string; label: string }[]; ctx: SiteCtx }
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const [type, setType] = useState('')
+  const valid = name.trim().length > 0 && type.length > 0
+  const create = () => {
+    if (!valid) return
+    d.ctx.onAddInstance(d.ctx.asmPath, d.parentPath, d.name, name.trim(), type)
+    setAdding(false)
+    setName('')
+  }
   return (
-    <div className="topo-container-node">
+    <div className={'topo-container-node' + (adding ? ' adding' : '')} onClick={(e) => e.stopPropagation()}>
       <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
       <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
-      {name}
+      {adding ? (
+        <div className="topo-add-inst">
+          <div className="topo-container-name">{d.name}</div>
+          <input autoFocus placeholder="name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && create()} />
+          <select value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="">type…</option>
+            {d.candidates.map((c) => (
+              <option key={c.fqn} value={c.fqn}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          <div className="topo-add-inst-actions">
+            <button className="mf-save" disabled={!valid} onClick={create}>add</button>
+            <button className="mf-cancel" onClick={() => setAdding(false)}>cancel</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <span>{d.name}</span>
+          <button className="topo-container-add" title="add instance" onClick={() => { setType(d.candidates.length === 1 ? d.candidates[0].fqn : ''); setAdding(true) }}>
+            +
+          </button>
+        </>
+      )}
     </div>
   )
 }
 
 const topoNodeTypes = { inst: TopoInstanceNode, container: TopoContainerNode }
 
-const gEdge = (id: string, source: string, target: string, label?: string): Edge => ({
+const gEdge = (id: string, source: string, target: string): Edge => ({
   id,
   source,
   target,
   sourceHandle: 'b',
   targetHandle: 't',
-  label,
   style: { stroke: EDGE_COLOR.Containment, strokeWidth: 1.5 },
   markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR.Containment },
-  labelStyle: { fill: '#dbeafe', fontSize: 11 },
-  labelBgStyle: { fill: '#0e1526' },
-  labelBgPadding: [4, 2],
-  labelBgBorderRadius: 3,
 })
 
-// The site canvas: a containment tree. Children are merged (flat, plain edges) until their parent is the focused
-// node, when each container becomes a small junction node (labelled by the container field) wiring to its children.
-function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | null): { nodes: Node[]; edges: Edge[] } {
+// The site canvas: a containment tree. Children are merged (flat) until their parent is the focused node, when its
+// type's containers each become a junction node (even empty ones — you fill them) that fans to its children.
+function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | null, ctx: SiteCtx): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = []
   const edges: Edge[] = []
   const X = 220
   const Y = 150
   let leaf = 0
 
-  const walk = (inst: ModelInstance, parentPath: string, depth: number): { id: string; x: number } => {
+  const walk = (inst: ModelInstance, parentPath: string, depth: number, removable: boolean): { id: string; x: number } => {
     const path = parentPath + '.' + inst.name
     const id = 'i:' + path
     const focused = path === focus
     const childXs: number[] = []
-    inst.containers.forEach((c, ci) => {
-      const results = c.children.map((ch) => walk(ch, path, depth + 1))
-      results.forEach((r) => childXs.push(r.x))
-      if (focused && results.length) {
-        const cx = results.reduce((s, r) => s + r.x, 0) / results.length
+
+    if (focused) {
+      // type-dictated containers (even empty), populated with the assembly's children
+      ctx.containersOf(inst.type).forEach((tc, ci) => {
+        const children = inst.containers.find((c) => c.name === tc.name)?.children ?? []
+        const results = children.map((ch) => walk(ch, path, depth + 1, true))
+        results.forEach((r) => childXs.push(r.x))
+        const cx = results.length ? results.reduce((s, r) => s + r.x, 0) / results.length : leaf++ * X
         const ctId = `ct:${path}:${ci}`
-        nodes.push({ id: ctId, type: 'container', position: { x: cx, y: depth * Y + Y * 0.5 }, data: { name: c.name } })
-        edges.push(gEdge(`e:${id}>${ctId}`, id, ctId)) // the junction node carries the container name
+        nodes.push({
+          id: ctId,
+          type: 'container',
+          position: { x: cx, y: depth * Y + Y * 0.5 },
+          data: { name: tc.name, parentPath: path, candidates: ctx.candidatesOf(tc.elementType), ctx } as unknown as Record<string, unknown>,
+        })
+        edges.push(gEdge(`e:${id}>${ctId}`, id, ctId))
         results.forEach((r) => edges.push(gEdge(`e:${ctId}>${r.id}`, ctId, r.id)))
-      } else {
-        results.forEach((r) => edges.push(gEdge(`e:${id}>${r.id}`, id, r.id)))
-      }
-    })
+      })
+    } else {
+      for (const c of inst.containers)
+        for (const ch of c.children) {
+          const r = walk(ch, path, depth + 1, false)
+          edges.push(gEdge(`e:${id}>${r.id}`, id, r.id))
+          childXs.push(r.x)
+        }
+    }
+
     const x = childXs.length ? (Math.min(...childXs) + Math.max(...childXs)) / 2 : leaf++ * X
-    nodes.push({ id, type: 'inst', position: { x, y: depth * Y }, data: { inst, focused } })
+    nodes.push({
+      id,
+      type: 'inst',
+      position: { x, y: depth * Y },
+      data: { inst, focused, path, params: ctx.paramsOf(inst.type), removable, ctx } as unknown as Record<string, unknown>,
+    })
     return { id, x }
   }
 
-  for (const m of site.models) walk(m, asm.name, 0)
+  for (const m of site.models) walk(m, asm.name, 0, true) // roots are removable
   return { nodes, edges }
 }
 
-function SiteView({ asm, site, onBack }: { asm: AssemblyModel; site: SiteInstance; onBack: () => void }) {
+function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: SiteInstance; ctx: SiteCtx; rev: number; onBack: () => void }) {
   const [focus, setFocus] = useState<string | null>(null)
-  const { nodes, edges } = buildSiteGraph(asm, site, focus)
+  const { nodes, edges } = buildSiteGraph(asm, site, focus, ctx)
 
   // ESC ascends one level (child → parent → site); clicking a node descends onto it.
   useEffect(() => {
@@ -1104,11 +1204,11 @@ function SiteView({ asm, site, onBack }: { asm: AssemblyModel; site: SiteInstanc
       </div>
       <div className="topo-canvas">
         <ReactFlow
-          key={'site:' + (focus ?? '')}
+          key={'site:' + (focus ?? '') + ':' + rev}
           defaultNodes={nodes}
           defaultEdges={edges}
           nodeTypes={topoNodeTypes}
-          onNodeClick={(_, node) => setFocus(node.id.slice(2))}
+          onNodeClick={(_, node) => node.type === 'inst' && setFocus(node.id.slice(2))}
           fitView
           fitViewOptions={{ minZoom: 0.3, maxZoom: 1.3 }}
           colorMode="dark"
@@ -1427,6 +1527,23 @@ export default function App() {
 
   // A type's [Parameter] member names (from the design IR) — so an instance offers them even when unset in the assembly.
   const paramsOf = (fqType: string) => typeParams.get(fqType) ?? []
+
+  // A model type's containers (its [Contains<T>] decorators) — type-dictated, so even empty ones show as lines.
+  const containersOf = (fqType: string) =>
+    working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'Containment').map((a) => ({ name: a.name, elementType: a.target })) ?? []
+
+  const modelTypes = useMemo(() => (working?.types ?? []).filter((t) => t.kind === 'Model'), [working])
+  // Model types assignable to a container's element type T (T itself or anything that inherits/implements it).
+  const candidatesOf = (elementType: string) =>
+    modelTypes
+      .filter((t) => key(t) === elementType || t.associations.some((a) => a.kind === 'Inheritance' && a.target === elementType))
+      .map((t) => ({ fqn: key(t), label: `${t.name} (${t.namespace})` }))
+
+  const onAddInstance = (asm: string, parentPath: string, container: string, name: string, type: string) =>
+    dispatch({ op: 'addInstance', asm, parentPath, container, name, type })
+  const onRemoveInstance = (asm: string, path: string) => dispatch({ op: 'removeInstance', asm, path })
+  const onSetInstanceConfig = (asm: string, path: string, key: string, value: string) =>
+    dispatch({ op: 'setInstanceConfig', asm, path, key, value })
 
   // The project's service types, for the add-service dropdown: "ClassName (Namespace)".
   const serviceTypes = useMemo(
@@ -1752,7 +1869,13 @@ export default function App() {
         {mode === 'topology' ? (
           drilledSite ? (
             <main className="topo-site-main">
-              <SiteView asm={drilledSite.asm} site={drilledSite.site} onBack={() => setOpenSite(null)} />
+              <SiteView
+                asm={drilledSite.asm}
+                site={drilledSite.site}
+                rev={rev}
+                onBack={() => setOpenSite(null)}
+                ctx={{ asmPath: drilledSite.asm.path, paramsOf, containersOf, candidatesOf, onAddInstance, onRemoveInstance, onSetInstanceConfig }}
+              />
             </main>
           ) : (
             <main className="topo-main">

@@ -17,6 +17,8 @@ Simulator:
             CapacityWh: 2000
         - Name: Bat2
           Type: DemoSim.Power.Battery
+          Config:
+            CapacityWh: 2000
       Refs:
       - Consumers:
         - DemoSim.Heater
