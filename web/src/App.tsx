@@ -55,6 +55,9 @@ type TopoAction =
   | { op: 'moveInstance'; asm: string; path: string; toParentPath: string; toContainer: string }
   | { op: 'removeInstance'; asm: string; path: string }
   | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
+  // reference/dep wiring — `name`/`member` name a [References<T>]/[ServiceRef] field on the instance's type
+  | { op: 'setReference'; asm: string; path: string; name: string; targets: string[] }
+  | { op: 'setServiceDep'; asm: string; path: string; member: string; service: string }
 
 const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
   models.map((m) => ({
@@ -129,6 +132,30 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
       const set = (m: ModelInstance): ModelInstance => ({ ...m, config: { ...m.config, [a.key]: a.value } })
       return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
     }
+    case 'setReference': {
+      const segs = pathSegs(a.path, asm.name)
+      const set = (m: ModelInstance): ModelInstance => {
+        const refs = !a.targets.length
+          ? m.refs.filter((r) => r.name !== a.name)
+          : m.refs.some((r) => r.name === a.name)
+            ? m.refs.map((r) => (r.name === a.name ? { ...r, targets: a.targets } : r))
+            : [...m.refs, { name: a.name, targets: a.targets }]
+        return { ...m, refs }
+      }
+      return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
+    }
+    case 'setServiceDep': {
+      const segs = pathSegs(a.path, asm.name)
+      const set = (m: ModelInstance): ModelInstance => {
+        const deps = !a.service
+          ? m.deps.filter((dd) => dd.member !== a.member)
+          : m.deps.some((dd) => dd.member === a.member)
+            ? m.deps.map((dd) => (dd.member === a.member ? { ...dd, service: a.service } : dd))
+            : [...m.deps, { member: a.member, service: a.service }]
+        return { ...m, deps }
+      }
+      return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
+    }
   }
 }
 
@@ -173,6 +200,7 @@ const TOPO_OPS = new Set([
   'renameSimulator', 'addSite', 'removeSite', 'renameSite', 'setSiteMaxEvents',
   'addService', 'removeService', 'renameService', 'setServiceConfig',
   'addRootModel', 'addInstance', 'moveInstance', 'removeInstance', 'setInstanceConfig',
+  'setReference', 'setServiceDep',
 ])
 type JournalEvent = Entry | TopoAction
 const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
@@ -1355,6 +1383,229 @@ function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: S
   )
 }
 
+// ── References view (edit-references button): wire [References<T>] / [ServiceRef] across the whole assembly ──────────
+
+type RefField = { name: string; target: string }
+// The data helpers the references view needs (supplied by the app); RefsView adds the view-local onWire below.
+type RefsData = {
+  refFieldsOf: (type: string) => RefField[]
+  serviceRefsOf: (type: string) => { member: string; target: string }[]
+  assignable: (type: string, T: string) => boolean // is an instance/service of `type` assignable to reference target `T`
+  services: { name: string; type: string }[] // the assembly's service instances (for the [ServiceRef] dropdown)
+  onSetReference: (asm: string, path: string, name: string, targets: string[]) => void
+  onSetServiceDep: (asm: string, path: string, member: string, service: string) => void
+}
+type RefsCtx = RefsData & { asmPath: string; onWire: (path: string, name: string, target: string) => void }
+
+const shortName = (fqn: string) => (fqn.includes('.') ? fqn.slice(fqn.lastIndexOf('.') + 1) : fqn)
+
+// A node in the references forest. Enlarged (and not wiring) it lists its type's [References<T>] fields (click → wiring)
+// and [ServiceRef] fields (a service dropdown). While wiring, every node is tinted lit/wirable/disabled instead.
+function RefNode({ data }: NodeProps) {
+  const d = data as {
+    inst: ModelInstance
+    path: string
+    enlarged: boolean
+    wire: null | { isSelf: boolean; lit: boolean; compatible: boolean; disabled: boolean }
+    ctx: RefsCtx
+  }
+  const { inst, ctx } = d
+  const refFields = ctx.refFieldsOf(inst.type)
+  const svcFields = ctx.serviceRefsOf(inst.type)
+  const hasFields = refFields.length > 0 || svcFields.length > 0
+  const cls =
+    'topo-fnode inst refnode' +
+    (d.enlarged ? ' focused' : '') +
+    (d.wire ? (d.wire.lit ? ' lit' : d.wire.disabled ? ' disabled' : ' wirable') : hasFields ? ' has-refs' : '')
+  return (
+    <div className={cls}>
+      <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
+      <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
+      <div className="topo-fnode-head">{inst.name}</div>
+      <div className="topo-fnode-type">{inst.type}</div>
+      {d.enlarged && !d.wire && (
+        <div className="ref-fields" onClick={(e) => e.stopPropagation()}>
+          {refFields.map((f) => {
+            const n = inst.refs.find((r) => r.name === f.name)?.targets.length ?? 0
+            return (
+              <button key={'ref:' + f.name} className="ref-field" onClick={() => ctx.onWire(d.path, f.name, f.target)}>
+                <span className="ref-field-name">{f.name}</span>
+                <span className="ref-field-t">→ {shortName(f.target)}{n ? ` · ${n}` : ''}</span>
+              </button>
+            )
+          })}
+          {svcFields.map((f) => {
+            const cur = inst.deps.find((dd) => dd.member === f.member)?.service ?? ''
+            const opts = ctx.services.filter((s) => ctx.assignable(s.type, f.target))
+            return (
+              <div key={'dep:' + f.member} className="ref-dep">
+                <span className="ref-field-name">{f.member}</span>
+                <select value={cur} onChange={(e) => ctx.onSetServiceDep(ctx.asmPath, d.path, f.member, e.target.value)}>
+                  <option value="">— none —</option>
+                  {opts.map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )
+          })}
+          {refFields.length === 0 && svcFields.length === 0 && <div className="ref-none">no references or service deps on this type</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const refsNodeTypes = { refnode: RefNode }
+
+// The combined instance forest of every site in the assembly, merged (containers flat). Node data carries each node's
+// wiring tint (lit / self / incompatible) when a reference field is being wired.
+function buildRefsGraph(
+  asm: AssemblyModel,
+  enlarged: string | null,
+  wiring: { path: string; name: string; target: string } | null,
+  wiringTargets: string[],
+  ctx: RefsCtx,
+): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = []
+  const edges: Edge[] = []
+  const X = 200
+  const Y = 150
+  let leaf = 0
+  const walk = (inst: ModelInstance, parentPath: string, depth: number): { id: string; x: number } => {
+    const path = parentPath + '.' + inst.name
+    const id = 'r:' + path
+    const childXs: number[] = []
+    for (const c of inst.containers)
+      for (const ch of c.children) {
+        const r = walk(ch, path, depth + 1)
+        edges.push(gEdge(`e:${id}>${r.id}`, id, r.id))
+        childXs.push(r.x)
+      }
+    const x = childXs.length ? (Math.min(...childXs) + Math.max(...childXs)) / 2 : leaf++ * X
+    let wire = null
+    if (wiring) {
+      const isSelf = path === wiring.path
+      const lit = wiringTargets.includes(path)
+      const compatible = ctx.assignable(inst.type, wiring.target)
+      wire = { isSelf, lit, compatible, disabled: isSelf || (!compatible && !lit) }
+    }
+    nodes.push({ id, type: 'refnode', position: { x, y: depth * Y }, data: { inst, path, enlarged: path === enlarged, wire, ctx } as unknown as Record<string, unknown> })
+    return { id, x }
+  }
+  for (const s of asm.sites) for (const m of s.models) walk(m, asm.name, 0)
+  return { nodes, edges }
+}
+
+function RefsView({ asm, data, rev, onBack }: { asm: AssemblyModel; data: RefsData; rev: number; onBack: () => void }) {
+  const [enlarged, setEnlarged] = useState<string | null>(null)
+  const [wiring, setWiring] = useState<{ path: string; name: string; target: string } | null>(null)
+
+  const findByPath = (path: string): ModelInstance | null => {
+    const segs = pathSegs(path, asm.name)
+    for (const s of asm.sites) {
+      const inst = findInstanceAt(s.models, segs)
+      if (inst) return inst
+    }
+    return null
+  }
+  const wiringTargets = wiring ? findByPath(wiring.path)?.refs.find((r) => r.name === wiring.name)?.targets ?? [] : []
+
+  // ESC steps out: wiring → enlarged → the sites view.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (wiring) setWiring(null)
+      else if (enlarged) setEnlarged(null)
+      else onBack()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [wiring, enlarged, onBack])
+
+  const ctx: RefsCtx = { ...data, asmPath: asm.path, onWire: (path, name, target) => setWiring({ path, name, target }) }
+  const { nodes, edges } = buildRefsGraph(asm, enlarged, wiring, wiringTargets, ctx)
+
+  const setTargets = (targets: string[]) => wiring && data.onSetReference(asm.path, wiring.path, wiring.name, targets)
+  const reorder = (i: number, dir: -1 | 1) => {
+    const arr = [...wiringTargets]
+    ;[arr[i], arr[i + dir]] = [arr[i + dir], arr[i]]
+    setTargets(arr)
+  }
+  const onNodeClick = (path: string) => {
+    if (!wiring) {
+      setEnlarged((e) => (e === path ? null : path))
+      return
+    }
+    if (wiringTargets.includes(path)) setTargets(wiringTargets.filter((t) => t !== path))
+    else if (path !== wiring.path && data.assignable(findByPath(path)?.type ?? '', wiring.target)) setTargets([...wiringTargets, path])
+  }
+
+  return (
+    <div className="topo-site">
+      <div className="topo-site-head">
+        <button className="topo-back" onClick={onBack}>
+          ← Sites
+        </button>
+        <span className="topo-site-name">References</span>
+        <span className="topo-dim">
+          · {asm.name}
+          {enlarged && !wiring ? ` · ${enlarged.slice(asm.name.length + 1)}` : ''}
+          {wiring ? ` · wiring ${wiring.name}` : ''}
+        </span>
+      </div>
+      <div className="topo-canvas ref-canvas">
+        {nodes.length === 0 ? (
+          <div className="topo-empty">No instances to wire — add root models in the site views first.</div>
+        ) : (
+          <ReactFlow
+            key={'refs:' + (enlarged ?? '') + ':' + (wiring ? wiring.path + '/' + wiring.name : '') + ':' + rev}
+            defaultNodes={nodes}
+            defaultEdges={edges}
+            nodeTypes={refsNodeTypes}
+            onNodeClick={(_, node) => onNodeClick(node.id.slice(2))}
+            fitView
+            fitViewOptions={{ minZoom: 0.3, maxZoom: 1.3 }}
+            colorMode="dark"
+            nodesConnectable={false}
+          >
+            <Background />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        )}
+        {wiring && (
+          <div className="ref-wire-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="ref-wire-head">
+              {wiring.name} <span className="ref-wire-t">→ {shortName(wiring.target)}</span>
+            </div>
+            <div className="ref-wire-hint">click a lit node to remove, an outlined node to add · ESC to finish</div>
+            <ol className="ref-wire-list">
+              {wiringTargets.map((t, i) => (
+                <li key={t}>
+                  <span className="ref-wire-idx">[{i}]</span>
+                  <span className="ref-wire-path">{t.slice(asm.name.length + 1)}</span>
+                  <button className="ref-wire-btn" disabled={i === 0} title="move up" onClick={() => reorder(i, -1)}>
+                    ▲
+                  </button>
+                  <button className="ref-wire-btn" disabled={i === wiringTargets.length - 1} title="move down" onClick={() => reorder(i, 1)}>
+                    ▼
+                  </button>
+                  <button className="ref-wire-btn del" title="remove" onClick={() => setTargets(wiringTargets.filter((_, j) => j !== i))}>
+                    ×
+                  </button>
+                </li>
+              ))}
+              {wiringTargets.length === 0 && <li className="ref-wire-empty">no targets — click compatible nodes</li>}
+            </ol>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Inline click-to-edit text. Enter commits; Esc and clicking away cancel (no commit). Stops propagation so a click
 // doesn't also trigger the card behind it.
 function EditableText({ value, onCommit, className, placeholder }: { value: string; onCommit: (v: string) => void; className: string; placeholder?: string }) {
@@ -1394,6 +1645,7 @@ function EditableText({ value, onCommit, className, placeholder }: { value: stri
 
 type TopoHandlers = {
   onOpenSite: (asmPath: string, siteName: string) => void
+  onOpenRefs: (asmPath: string) => void
   onRenameSimulator: (asm: string, to: string) => void
   onAddSite: (asm: string) => void
   onRemoveSite: (asm: string, name: string) => void
@@ -1533,6 +1785,9 @@ function TopologyView({
           <div className="topo-asm-head">
             <EditableText className="topo-sim" value={a.name} placeholder="_" onCommit={(to) => h.onRenameSimulator(a.path, to)} />
             <span className="topo-path">{a.path.split(/[\\/]/).pop()}</span>
+            <button className="topo-refs-btn" title="wire references & service deps across the whole simulator" onClick={() => h.onOpenRefs(a.path)}>
+              ⇄ references
+            </button>
           </div>
           <div className="topo-cols">
             <section className="topo-col">
@@ -1575,6 +1830,7 @@ export default function App() {
   const [mode, setMode] = useState<'design' | 'topology'>('design')
   const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // topology baseline; null = not yet loaded
   const [openSite, setOpenSite] = useState<{ asmPath: string; siteName: string } | null>(null) // drilled-into site
+  const [openRefs, setOpenRefs] = useState<{ asmPath: string } | null>(null) // open references view (per assembly)
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
@@ -1601,6 +1857,21 @@ export default function App() {
     return m
   }, [working])
 
+  // Each known type → its [References<T>] field names and its [ServiceRef] member names (from the design IR). Used to
+  // prune instance ref/dep bindings whose field no longer exists (else the generator wires a missing reference).
+  const typeRefNames = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const t of working?.types ?? [])
+      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'Reference').map((a) => a.name)))
+    return m
+  }, [working])
+  const typeDepMembers = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const t of working?.types ?? [])
+      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'ServiceDep').map((a) => a.name)))
+    return m
+  }, [working])
+
   const openPath = async (p: string) => {
     if (!conn.current || !p.trim()) return
     setBusy(true)
@@ -1612,6 +1883,7 @@ export default function App() {
     setRev(0)
     setAssemblies(null) // re-fetched lazily when the Topology tab is opened
     setOpenSite(null)
+    setOpenRefs(null)
     try {
       setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
     } catch (e) {
@@ -1643,20 +1915,36 @@ export default function App() {
       if (!valid) return config // not a known project type — can't validate, leave as-is
       return Object.fromEntries(Object.entries(config).filter(([k]) => valid.includes(k)))
     }
+    // Drop ref/dep bindings whose [References<T>]/[ServiceRef] field was removed in Design (mirrors the Config prune).
+    const pruneRefs = (refs: ReferenceBinding[], type: string) => {
+      const valid = typeRefNames.get(type)
+      return valid ? refs.filter((r) => valid.has(r.name)) : refs
+    }
+    const pruneDeps = (deps: DepBinding[], type: string) => {
+      const valid = typeDepMembers.get(type)
+      return valid ? deps.filter((d) => valid.has(d.member)) : deps
+    }
     const pruneModels = (models: ModelInstance[]): ModelInstance[] =>
-      models.map((mm) => ({ ...mm, config: prune(mm.config, mm.type), containers: mm.containers.map((c) => ({ ...c, children: pruneModels(c.children) })) }))
+      models.map((mm) => ({
+        ...mm,
+        config: prune(mm.config, mm.type),
+        refs: pruneRefs(mm.refs, mm.type),
+        deps: pruneDeps(mm.deps, mm.type),
+        containers: mm.containers.map((c) => ({ ...c, children: pruneModels(c.children) })),
+      }))
     return folded.map((a) => ({
       ...a,
       services: a.services.map((s) => ({ ...s, config: prune(s.config, s.type) })),
       sites: a.sites.map((s) => ({ ...s, models: pruneModels(s.models) })),
     }))
-  }, [assemblies, journal, typeParams])
+  }, [assemblies, journal, typeParams, typeRefNames, typeDepMembers])
   const drilledSite = useMemo(() => {
     if (!openSite || !workingAssemblies) return null
     const asm = workingAssemblies.find((x) => x.path === openSite.asmPath)
     const site = asm?.sites.find((s) => s.name === openSite.siteName)
     return asm && site ? { asm, site } : null
   }, [openSite, workingAssemblies])
+  const drilledRefs = useMemo(() => (openRefs && workingAssemblies ? workingAssemblies.find((x) => x.path === openRefs.asmPath) ?? null : null), [openRefs, workingAssemblies])
 
   // A type's [Parameter] member names (from the design IR) — so an instance offers them even when unset in the assembly.
   const paramsOf = (fqType: string) => typeParams.get(fqType) ?? []
@@ -1694,6 +1982,17 @@ export default function App() {
   const onSetInstanceConfig = (asm: string, path: string, key: string, value: string) =>
     dispatch({ op: 'setInstanceConfig', asm, path, key, value })
 
+  // References view helpers: a type's [References<T>] / [ServiceRef] fields, and one-level assignability to a target T.
+  const refFieldsOf = (fqType: string) =>
+    working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'Reference').map((a) => ({ name: a.name, target: a.target })) ?? []
+  const serviceRefsOf = (fqType: string) =>
+    working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'ServiceDep').map((a) => ({ member: a.name, target: a.target })) ?? []
+  const assignable = (type: string, target: string) =>
+    type === target || !!working?.types.find((t) => key(t) === type)?.associations.some((a) => a.kind === 'Inheritance' && a.target === target)
+  const onSetReference = (asm: string, path: string, name: string, targets: string[]) => dispatch({ op: 'setReference', asm, path, name, targets })
+  const onSetServiceDep = (asm: string, path: string, member: string, service: string) => dispatch({ op: 'setServiceDep', asm, path, member, service })
+  const refsData: RefsData = { refFieldsOf, serviceRefsOf, assignable, services: drilledRefs?.services ?? [], onSetReference, onSetServiceDep }
+
   // The project's service types, for the add-service dropdown: "ClassName (Namespace)".
   const serviceTypes = useMemo(
     () =>
@@ -1706,6 +2005,7 @@ export default function App() {
 
   const topoHandlers: TopoHandlers = {
     onOpenSite: (asmPath, siteName) => setOpenSite({ asmPath, siteName }),
+    onOpenRefs: (asmPath) => setOpenRefs({ asmPath }),
     onRenameSimulator: (asm, to) => dispatch({ op: 'renameSimulator', asm, to }),
     onAddSite: (asm) => dispatch({ op: 'addSite', asm, name: randomName() }),
     onRemoveSite: (asm, name) => dispatch({ op: 'removeSite', asm, name }),
@@ -2016,7 +2316,11 @@ export default function App() {
       </header>
       <div className="body">
         {mode === 'topology' ? (
-          drilledSite ? (
+          drilledRefs ? (
+            <main className="topo-site-main">
+              <RefsView asm={drilledRefs} data={refsData} rev={rev} onBack={() => setOpenRefs(null)} />
+            </main>
+          ) : drilledSite ? (
             <main className="topo-site-main">
               <SiteView
                 asm={drilledSite.asm}

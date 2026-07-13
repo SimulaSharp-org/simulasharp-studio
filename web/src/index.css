@@ -33,6 +33,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .topo-empty { opacity: 0.6; padding: 24px; text-align: center; }
 .topo-asm { max-width: 760px; margin: 0 auto 40px; }
 .topo-asm-head {
+  position: relative;
   display: flex;
   align-items: baseline;
   justify-content: center;
@@ -214,6 +215,94 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   cursor: pointer;
 }
 .topo-move-select:hover { border-color: #2563eb; }
+
+/* edit-references button (assembly header, opens the whole-simulator references view) */
+.topo-refs-btn {
+  position: absolute;
+  right: 0;
+  top: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid #0e7490;
+  border-radius: 5px;
+  background: #082f3a;
+  color: #a5f3fc;
+  cursor: pointer;
+}
+.topo-refs-btn:hover { background: #0e4a5a; border-color: #38bdf8; }
+
+/* references view */
+.ref-canvas { position: relative; }
+.refnode.has-refs { border-color: #0e7490; border-left-color: #38bdf8; background: #071b22; }
+/* wiring: every compatible node glows yellow; the selected (wired) ones also carry a thick yellow border */
+.refnode.wirable { border-color: #a16207; box-shadow: 0 0 13px 2px rgba(250, 204, 21, 0.55); cursor: pointer; }
+.refnode.lit { border: 2px solid #fbbf24 !important; box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.5), 0 0 15px 3px rgba(250, 204, 21, 0.7); }
+.refnode.disabled { opacity: 0.3; }
+.ref-fields { padding: 0 10px 9px; display: flex; flex-direction: column; gap: 5px; }
+.ref-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 7px;
+  border: 1px solid #0e7490;
+  border-radius: 4px;
+  background: #082f3a;
+  color: #a5f3fc;
+  cursor: pointer;
+}
+.ref-field:hover { background: #0e4a5a; }
+.ref-field-name { font-weight: 600; }
+.ref-field-t { opacity: 0.7; }
+.ref-dep { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.ref-dep .ref-field-name { color: #c084fc; }
+.ref-dep select {
+  flex: 1;
+  font: inherit;
+  font-size: 11px;
+  color: #e9d5ff;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.ref-none { font-size: 11px; opacity: 0.5; }
+.ref-wire-panel {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 240px;
+  z-index: 20;
+  padding: 12px;
+  border: 1px solid #0e7490;
+  border-radius: 8px;
+  background: #0b1620;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.ref-wire-head { font-size: 13px; font-weight: 700; color: #a5f3fc; }
+.ref-wire-head .ref-wire-t { font-weight: 400; opacity: 0.6; }
+.ref-wire-hint { font-size: 10px; opacity: 0.55; margin: 4px 0 8px; line-height: 1.4; }
+.ref-wire-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.ref-wire-list li { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.ref-wire-idx { opacity: 0.5; font-variant-numeric: tabular-nums; }
+.ref-wire-path { flex: 1; color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ref-wire-btn {
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  font-size: 11px;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  background: #172033;
+  color: #93c5fd;
+  cursor: pointer;
+}
+.ref-wire-btn:disabled { opacity: 0.3; cursor: default; }
+.ref-wire-btn.del { color: #fca5a5; border-color: #7f1d1d; }
+.ref-wire-empty { opacity: 0.5; font-style: italic; }
 .topo-fnode .topo-param { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .topo-fnode .topo-param-k { opacity: 0.7; }
 .topo-fnode .topo-param-v { flex: 1; color: #cbd5e1; cursor: text; border-radius: 3px; padding: 0 2px; }
