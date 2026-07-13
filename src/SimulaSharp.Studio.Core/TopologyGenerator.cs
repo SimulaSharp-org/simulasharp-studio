@@ -39,8 +39,9 @@ public sealed class TopologyGenerator
             pending.Add((a.Path, yaml));
         }
 
+        var utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         foreach (var (path, yaml) in pending)
-            await File.WriteAllTextAsync(path, yaml.Replace("\r\n", "\n"), Encoding.UTF8, ct).ConfigureAwait(false);
+            await File.WriteAllTextAsync(path, yaml.Replace("\r\n", "\n"), utf8NoBom, ct).ConfigureAwait(false);
 
         return new TopologyWriteResult(true, []);
     }

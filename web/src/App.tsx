@@ -40,13 +40,15 @@ type AssemblyModel = { name: string; missionStart: string | null; services: Serv
 // Topology edit journal (asm = the assembly file path). Renames/removes of a service cascade through the
 // instance tree's [ServiceRef] deps so the YAML never dangles.
 type TopoAction =
+  | { op: 'renameSimulator'; asm: string; to: string }
   | { op: 'addSite'; asm: string; name: string }
   | { op: 'removeSite'; asm: string; name: string }
   | { op: 'renameSite'; asm: string; from: string; to: string }
+  | { op: 'setSiteMaxEvents'; asm: string; name: string; maxEvents: number }
   | { op: 'addService'; asm: string; name: string; type: string }
   | { op: 'removeService'; asm: string; name: string }
   | { op: 'renameService'; asm: string; from: string; to: string }
-  | { op: 'setServiceType'; asm: string; name: string; type: string }
+  | { op: 'setServiceConfig'; asm: string; name: string; key: string; value: string }
 
 const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
   models.map((m) => ({
@@ -57,12 +59,16 @@ const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | nu
 
 function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
   switch (a.op) {
+    case 'renameSimulator':
+      return { ...asm, name: a.to }
     case 'addSite':
       return { ...asm, sites: [...asm.sites, { name: a.name, maxEvents: 64, models: [] }] }
     case 'removeSite':
       return { ...asm, sites: asm.sites.filter((s) => s.name !== a.name) }
     case 'renameSite':
       return { ...asm, sites: asm.sites.map((s) => (s.name === a.from ? { ...s, name: a.to } : s)) }
+    case 'setSiteMaxEvents':
+      return { ...asm, sites: asm.sites.map((s) => (s.name === a.name ? { ...s, maxEvents: a.maxEvents } : s)) }
     case 'addService':
       return { ...asm, services: [...asm.services, { name: a.name, type: a.type, config: {}, deps: [] }] }
     case 'removeService':
@@ -77,13 +83,28 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
         services: asm.services.map((s) => (s.name === a.from ? { ...s, name: a.to } : s)),
         sites: asm.sites.map((s) => ({ ...s, models: mapDeps(s.models, (d) => (d.service === a.from ? { ...d, service: a.to } : d)) })),
       }
-    case 'setServiceType':
-      return { ...asm, services: asm.services.map((s) => (s.name === a.name ? { ...s, type: a.type } : s)) }
+    case 'setServiceConfig':
+      return { ...asm, services: asm.services.map((s) => (s.name === a.name ? { ...s, config: { ...s.config, [a.key]: a.value } } : s)) }
   }
+}
+
+const randomName = () => {
+  const alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  let s = ''
+  for (let i = 0; i < 5; i++) s += alpha[Math.floor(Math.random() * alpha.length)]
+  return s
 }
 
 const applyTopo = (assemblies: AssemblyModel[], a: TopoAction): AssemblyModel[] =>
   assemblies.map((x) => (x.path === a.asm ? applyTopoToAsm(x, a) : x))
+
+// Design and topology edits share one journal (the snapshot's event list). Events are told apart by op.
+const TOPO_OPS = new Set([
+  'renameSimulator', 'addSite', 'removeSite', 'renameSite', 'setSiteMaxEvents',
+  'addService', 'removeService', 'renameService', 'setServiceConfig',
+])
+type JournalEvent = Entry | TopoAction
+const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
 
 const uniqueName = (base: string, taken: Set<string>) => {
   let n = base
@@ -1101,11 +1122,11 @@ function SiteView({ asm, site, onBack }: { asm: AssemblyModel; site: SiteInstanc
   )
 }
 
-// Inline click-to-edit text (Enter commits, Esc cancels). Stops propagation so it doesn't open the card.
+// Inline click-to-edit text. Enter commits; Esc and clicking away cancel (no commit). Stops propagation so a click
+// doesn't also trigger the card behind it.
 function EditableText({ value, onCommit, className, placeholder }: { value: string; onCommit: (v: string) => void; className: string; placeholder?: string }) {
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(value)
-  const cancelled = useRef(false)
   if (!editing)
     return (
       <span
@@ -1114,7 +1135,6 @@ function EditableText({ value, onCommit, className, placeholder }: { value: stri
         onClick={(e) => {
           e.stopPropagation()
           setText(value)
-          cancelled.current = false
           setEditing(true)
         }}
       >
@@ -1128,33 +1148,149 @@ function EditableText({ value, onCommit, className, placeholder }: { value: stri
       value={text}
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        setEditing(false)
-        if (!cancelled.current && text.trim() && text.trim() !== value) onCommit(text.trim())
-      }}
+      onBlur={() => setEditing(false)} // clicking away cancels
       onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        else if (e.key === 'Escape') {
-          cancelled.current = true
-          ;(e.target as HTMLInputElement).blur()
-        }
+        if (e.key === 'Enter') {
+          setEditing(false)
+          if (text.trim() && text.trim() !== value) onCommit(text.trim())
+        } else if (e.key === 'Escape') setEditing(false)
       }}
     />
   )
 }
 
 type TopoHandlers = {
-  onOpenSite: (asm: AssemblyModel, s: SiteInstance) => void
+  onOpenSite: (asmPath: string, siteName: string) => void
+  onRenameSimulator: (asm: string, to: string) => void
   onAddSite: (asm: string) => void
   onRemoveSite: (asm: string, name: string) => void
   onRenameSite: (asm: string, from: string, to: string) => void
-  onAddService: (asm: string) => void
+  onSetSiteMaxEvents: (asm: string, name: string, value: string) => void
+  onAddService: (asm: string, type: string) => void
   onRemoveService: (asm: string, name: string) => void
   onRenameService: (asm: string, from: string, to: string) => void
-  onSetServiceType: (asm: string, name: string, type: string) => void
+  onSetServiceConfig: (asm: string, name: string, key: string, value: string) => void
 }
 
-function TopologyView({ assemblies, h }: { assemblies: AssemblyModel[] | null; h: TopoHandlers }) {
+// A service card: name heading + (read-only) type subtitle + round delete. Click the box to edit — the name becomes
+// an input and its Config parameters appear; clicking away (focus leaves the card) commits and collapses.
+function ServiceCard({ asm, s, params, h }: { asm: string; s: ServiceInstance; params: string[]; h: TopoHandlers }) {
+  const [expanded, setExpanded] = useState(false)
+  const [name, setName] = useState(s.name)
+  return (
+    <>
+      {/* while editing, a backdrop cancels on click and swallows it (so it doesn't enter another card) */}
+      {expanded && <div className="topo-backdrop" onClick={() => setExpanded(false)} />}
+      <div
+        className={'topo-card service' + (expanded ? ' expanded' : '')}
+        onClick={() => {
+          if (!expanded) {
+            setName(s.name)
+            setExpanded(true)
+          }
+        }}
+      >
+        <button className="topo-del round" title="delete service" onClick={(e) => { e.stopPropagation(); h.onRemoveService(asm, s.name) }}>
+          ×
+        </button>
+        {expanded ? (
+          <input
+            className="topo-name-input"
+            autoFocus
+            value={name}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const n = name.trim()
+                if (n && n !== s.name) h.onRenameService(asm, s.name, n)
+                setExpanded(false)
+              } else if (e.key === 'Escape') setExpanded(false)
+            }}
+          />
+        ) : (
+          <div className="topo-card-name">{s.name || '_'}</div>
+        )}
+        <div className="topo-card-type">{s.type || '_'}</div>
+        {expanded && (
+          <div className="topo-params" onClick={(e) => e.stopPropagation()}>
+            {params.length === 0 && <div className="topo-params-empty">no parameters on this type</div>}
+            {params.map((k) => (
+              <div key={k} className="topo-param">
+                <span className="topo-param-k">{k}</span>
+                <EditableText className="topo-param-v" value={s.config[k] ?? ''} placeholder="default" onCommit={(val) => h.onSetServiceConfig(asm, s.name, k, val)} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+// A site card: name heading + editable max-events subtitle + round delete. Clicking the card (outside the editable
+// name/max-events) opens the SimSite view — unless the click was cancelling an inline edit, in which case it's swallowed.
+function SiteCard({ asm, site, h }: { asm: string; site: SiteInstance; h: TopoHandlers }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const cancelling = useRef(false)
+  return (
+    <div
+      ref={ref}
+      className="topo-card site"
+      title="open site"
+      onMouseDown={() => {
+        cancelling.current = !!ref.current?.querySelector('.inline-edit') // a field is being edited → this click cancels
+      }}
+      onClick={() => {
+        if (cancelling.current) {
+          cancelling.current = false
+          return
+        }
+        h.onOpenSite(asm, site.name)
+      }}
+    >
+      <button className="topo-del round" title="delete site" onClick={(e) => { e.stopPropagation(); h.onRemoveSite(asm, site.name) }}>
+        ×
+      </button>
+      <EditableText className="topo-card-name" value={site.name} placeholder="_" onCommit={(to) => h.onRenameSite(asm, site.name, to)} />
+      <div className="topo-card-sub">
+        max <EditableText className="topo-sub-num" value={String(site.maxEvents)} onCommit={(v) => h.onSetSiteMaxEvents(asm, site.name, v)} /> events
+      </div>
+    </div>
+  )
+}
+
+// "+ service" is a dropdown of the project's service types (a service needs a type at creation).
+function AddServiceRow({ types, onAdd }: { types: { fqn: string; label: string }[]; onAdd: (type: string) => void }) {
+  return (
+    <select
+      className="topo-add topo-add-select"
+      value=""
+      onChange={(e) => {
+        if (e.target.value) onAdd(e.target.value)
+      }}
+    >
+      <option value="">+ service…</option>
+      {types.map((t) => (
+        <option key={t.fqn} value={t.fqn}>
+          {t.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+function TopologyView({
+  assemblies,
+  paramsOf,
+  serviceTypes,
+  h,
+}: {
+  assemblies: AssemblyModel[] | null
+  paramsOf: (fqType: string) => string[]
+  serviceTypes: { fqn: string; label: string }[]
+  h: TopoHandlers
+}) {
   if (assemblies === null) return <div className="topo-empty">Loading topology…</div>
   if (!assemblies.length) return <div className="topo-empty">No assemblies (*.simassembly.yaml) registered in this project.</div>
   return (
@@ -1162,45 +1298,22 @@ function TopologyView({ assemblies, h }: { assemblies: AssemblyModel[] | null; h
       {assemblies.map((a) => (
         <div key={a.path} className="topo-asm">
           <div className="topo-asm-head">
-            <span className="topo-sim">
-              {a.name}
-              <em>Simulator</em>
-            </span>
+            <EditableText className="topo-sim" value={a.name} placeholder="_" onCommit={(to) => h.onRenameSimulator(a.path, to)} />
             <span className="topo-path">{a.path.split(/[\\/]/).pop()}</span>
           </div>
           <div className="topo-cols">
             <section className="topo-col">
               <div className="topo-col-title">Services · {a.services.length}</div>
               {a.services.map((s) => (
-                <div key={s.name} className="topo-card service">
-                  <EditableText className="topo-card-name" value={s.name} onCommit={(to) => h.onRenameService(a.path, s.name, to)} />
-                  <EditableText className="topo-card-type" value={s.type} placeholder="type…" onCommit={(t) => h.onSetServiceType(a.path, s.name, t)} />
-                  <button className="topo-del" title="delete service" onClick={() => h.onRemoveService(a.path, s.name)}>
-                    ×
-                  </button>
-                </div>
+                <ServiceCard key={s.name} asm={a.path} s={s} params={paramsOf(s.type)} h={h} />
               ))}
-              <button className="topo-add" onClick={() => h.onAddService(a.path)}>
-                + service
-              </button>
+              <AddServiceRow types={serviceTypes} onAdd={(type) => h.onAddService(a.path, type)} />
             </section>
 
             <section className="topo-col">
               <div className="topo-col-title">Sites · {a.sites.length}</div>
               {a.sites.map((site) => (
-                <div key={site.name} className="topo-card site" title="open site" onClick={() => h.onOpenSite(a, site)}>
-                  <EditableText className="topo-card-name" value={site.name} onCommit={(to) => h.onRenameSite(a.path, site.name, to)} />
-                  <button
-                    className="topo-del"
-                    title="delete site"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      h.onRemoveSite(a.path, site.name)
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
+                <SiteCard key={site.name} asm={a.path} site={site} h={h} />
               ))}
               <button className="topo-add" onClick={() => h.onAddSite(a.path)}>
                 + site
@@ -1219,8 +1332,8 @@ export default function App() {
   const conn = useRef<signalR.HubConnection | null>(null)
   const [connected, setConnected] = useState(false)
   const [baseline, setBaseline] = useState<ProjectModel | null>(null)
-  const [journal, setJournal] = useState<Entry[]>([])
-  const [redo, setRedo] = useState<Entry[]>([])
+  const [journal, setJournal] = useState<JournalEvent[]>([]) // shared design + topology event list
+  const [redo, setRedo] = useState<JournalEvent[]>([])
   const [rev, setRev] = useState(0) // bumps on every working-IR change; re-keys the canvas so the box re-renders
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -1228,9 +1341,6 @@ export default function App() {
   const [genMsg, setGenMsg] = useState('')
   const [mode, setMode] = useState<'design' | 'topology'>('design')
   const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // topology baseline; null = not yet loaded
-  const [topoJournal, setTopoJournal] = useState<TopoAction[]>([])
-  const [topoRedo, setTopoRedo] = useState<TopoAction[]>([])
-  const [topoMsg, setTopoMsg] = useState('')
   const [openSite, setOpenSite] = useState<{ asmPath: string; siteName: string } | null>(null) // drilled-into site
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
@@ -1239,12 +1349,24 @@ export default function App() {
   const [deleteNs, setDeleteNs] = useState<string | null>(null) // namespace pending a delete/move-up choice
   const [movingType, setMovingType] = useState<string | null>(null) // type key pending a "Move to…" target
 
-  const working = useMemo(() => (baseline ? journal.reduce(applyEntry, baseline) : null), [baseline, journal])
+  const working = useMemo(
+    () => (baseline ? (journal.filter((e) => !isTopo(e)) as Entry[]).reduce(applyEntry, baseline) : null),
+    [baseline, journal],
+  )
   const selected = useMemo(
     () => working?.types.find((t) => key(t) === selectedKey) ?? null,
     [working, selectedKey],
   )
   const root = useMemo(() => buildTree(working?.types ?? []), [working])
+
+  // Each known (project) type → its [Parameter] names. Used to offer parameters on instances and to prune stale
+  // Config entries whose parameter no longer exists on the type (else the generator emits a call for a missing param).
+  const typeParams = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const t of working?.types ?? [])
+      m.set(key(t), t.members.filter((mm) => mm.facets.includes('Parameter')).map((mm) => mm.name))
+    return m
+  }, [working])
 
   const openPath = async (p: string) => {
     if (!conn.current || !p.trim()) return
@@ -1256,9 +1378,6 @@ export default function App() {
     setRedo([])
     setRev(0)
     setAssemblies(null) // re-fetched lazily when the Topology tab is opened
-    setTopoJournal([])
-    setTopoRedo([])
-    setTopoMsg('')
     setOpenSite(null)
     try {
       setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
@@ -1281,11 +1400,24 @@ export default function App() {
     }
   }
 
-  // Working topology = baseline folded through the topology journal; the drilled-into site is resolved from it.
-  const workingAssemblies = useMemo(
-    () => (assemblies ? topoJournal.reduce(applyTopo, assemblies) : null),
-    [assemblies, topoJournal],
-  )
+  // Working topology = baseline folded through the topology events, then Config pruned to each type's real parameters
+  // (so removing a parameter in Design drops its stale Config here and from the write-back).
+  const workingAssemblies = useMemo(() => {
+    if (!assemblies) return null
+    const folded = (journal.filter(isTopo) as TopoAction[]).reduce(applyTopo, assemblies)
+    const prune = (config: Record<string, string>, type: string) => {
+      const valid = typeParams.get(type)
+      if (!valid) return config // not a known project type — can't validate, leave as-is
+      return Object.fromEntries(Object.entries(config).filter(([k]) => valid.includes(k)))
+    }
+    const pruneModels = (models: ModelInstance[]): ModelInstance[] =>
+      models.map((mm) => ({ ...mm, config: prune(mm.config, mm.type), containers: mm.containers.map((c) => ({ ...c, children: pruneModels(c.children) })) }))
+    return folded.map((a) => ({
+      ...a,
+      services: a.services.map((s) => ({ ...s, config: prune(s.config, s.type) })),
+      sites: a.sites.map((s) => ({ ...s, models: pruneModels(s.models) })),
+    }))
+  }, [assemblies, journal, typeParams])
   const drilledSite = useMemo(() => {
     if (!openSite || !workingAssemblies) return null
     const asm = workingAssemblies.find((x) => x.path === openSite.asmPath)
@@ -1293,67 +1425,41 @@ export default function App() {
     return asm && site ? { asm, site } : null
   }, [openSite, workingAssemblies])
 
-  const topoDispatch = (a: TopoAction) => {
-    setTopoJournal((j) => [...j, a])
-    setTopoRedo([])
-    setTopoMsg('')
-  }
-  const topoUndo = () => {
-    if (!topoJournal.length) return
-    setTopoRedo([topoJournal[topoJournal.length - 1], ...topoRedo])
-    setTopoJournal(topoJournal.slice(0, -1))
-  }
-  const topoRedoFn = () => {
-    if (!topoRedo.length) return
-    setTopoJournal([...topoJournal, topoRedo[0]])
-    setTopoRedo(topoRedo.slice(1))
-  }
-  const topoDiscard = () => {
-    setTopoJournal([])
-    setTopoRedo([])
-  }
+  // A type's [Parameter] member names (from the design IR) — so an instance offers them even when unset in the assembly.
+  const paramsOf = (fqType: string) => typeParams.get(fqType) ?? []
 
-  const topoGenerate = async () => {
-    if (!conn.current || !workingAssemblies || !topoJournal.length) return
-    setTopoMsg('Generating…')
-    setError('')
-    try {
-      const res = await conn.current.invoke<{ ok: boolean; errors: string[] }>('WriteAssemblies', workingAssemblies)
-      if (res.ok) {
-        setAssemblies(workingAssemblies)
-        setTopoJournal([])
-        setTopoRedo([])
-        setTopoMsg('Generated ✓')
-      } else {
-        setTopoMsg('Generate failed')
-        setError(res.errors.join('\n') || 'unknown error')
-      }
-    } catch (e) {
-      setTopoMsg('')
-      setError(String(e))
-    }
-  }
+  // The project's service types, for the add-service dropdown: "ClassName (Namespace)".
+  const serviceTypes = useMemo(
+    () =>
+      (working?.types ?? [])
+        .filter((t) => t.kind === 'Service' || t.kind === 'LooselyCoupledService')
+        .map((t) => ({ fqn: key(t), label: `${t.name} (${t.namespace})` }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    [working],
+  )
 
   const topoHandlers: TopoHandlers = {
-    onOpenSite: (asm, site) => setOpenSite({ asmPath: asm.path, siteName: site.name }),
-    onAddSite: (asm) => {
-      const target = workingAssemblies?.find((x) => x.path === asm)
-      topoDispatch({ op: 'addSite', asm, name: uniqueName('Site', new Set(target?.sites.map((s) => s.name))) })
+    onOpenSite: (asmPath, siteName) => setOpenSite({ asmPath, siteName }),
+    onRenameSimulator: (asm, to) => dispatch({ op: 'renameSimulator', asm, to }),
+    onAddSite: (asm) => dispatch({ op: 'addSite', asm, name: randomName() }),
+    onRemoveSite: (asm, name) => dispatch({ op: 'removeSite', asm, name }),
+    onRenameSite: (asm, from, to) => from !== to && dispatch({ op: 'renameSite', asm, from, to }),
+    onSetSiteMaxEvents: (asm, name, v) => {
+      const n = parseInt(v, 10)
+      dispatch({ op: 'setSiteMaxEvents', asm, name, maxEvents: Number.isNaN(n) ? 64 : Math.max(10, n) })
     },
-    onRemoveSite: (asm, name) => topoDispatch({ op: 'removeSite', asm, name }),
-    onRenameSite: (asm, from, to) => from !== to && topoDispatch({ op: 'renameSite', asm, from, to }),
-    onAddService: (asm) => {
+    onAddService: (asm, type) => {
       const target = workingAssemblies?.find((x) => x.path === asm)
-      topoDispatch({ op: 'addService', asm, name: uniqueName('Service', new Set(target?.services.map((s) => s.name))), type: '' })
+      dispatch({ op: 'addService', asm, name: uniqueName('Service', new Set(target?.services.map((s) => s.name))), type })
     },
-    onRemoveService: (asm, name) => topoDispatch({ op: 'removeService', asm, name }),
-    onRenameService: (asm, from, to) => from !== to && topoDispatch({ op: 'renameService', asm, from, to }),
-    onSetServiceType: (asm, name, type) => topoDispatch({ op: 'setServiceType', asm, name, type }),
+    onRemoveService: (asm, name) => dispatch({ op: 'removeService', asm, name }),
+    onRenameService: (asm, from, to) => from !== to && dispatch({ op: 'renameService', asm, from, to }),
+    onSetServiceConfig: (asm, name, key, value) => dispatch({ op: 'setServiceConfig', asm, name, key, value }),
   }
 
   // Edit commands. dispatch appends an action (clearing the redo stack); undo/redo/discard move
   // between journal and redo. Every one bumps rev so the (uncontrolled) canvas remounts and re-reads.
-  const dispatch = (a: Entry) => {
+  const dispatch = (a: JournalEvent) => {
     setJournal((j) => [...j, a])
     setRedo([])
     setRev((r) => r + 1)
@@ -1377,29 +1483,42 @@ export default function App() {
     setRev((r) => r + 1)
   }
 
-  // Generate: replay the pending journal into source. On success the backend returns the freshly
-  // re-derived IR, which becomes the new baseline (clearing the journal); on failure it writes nothing
-  // and returns the blocking errors.
+  // Generate: replay the whole shared journal. Write the topology YAML *first* so the code write-back's compile-verify
+  // sees a consistent assembly (e.g. a parameter removed in Design and its now-pruned Config land together). Baselines
+  // update and the journal clears only when both succeed.
   const generate = async () => {
-    if (!conn.current || !baseline || !journal.length) return
+    if (!conn.current || !journal.length) return
+    const designActions = flatten(journal.filter((e) => !isTopo(e)) as Entry[])
+    // Write the topology whenever the working assemblies differ from the baseline — that includes Config pruned by a
+    // design edit (e.g. a removed parameter), which has no topology *action* of its own.
+    const topoChanged = !!(assemblies && workingAssemblies && JSON.stringify(workingAssemblies) !== JSON.stringify(assemblies))
     setGenMsg('Generating…')
     setError('')
     try {
-      const res = await conn.current.invoke<{ ok: boolean; errors: string[]; model: ProjectModel | null }>(
-        'Generate',
-        baseline.path,
-        flatten(journal),
-      )
-      if (res.ok && res.model) {
-        setBaseline(res.model)
-        setJournal([])
-        setRedo([])
-        setRev((r) => r + 1)
-        setGenMsg('Generated ✓')
-      } else {
-        setGenMsg('Generate failed')
-        setError(res.errors.join('\n') || 'unknown error')
+      if (topoChanged && workingAssemblies) {
+        const res = await conn.current.invoke<{ ok: boolean; errors: string[] }>('WriteAssemblies', workingAssemblies)
+        if (!res.ok) {
+          setGenMsg('Generate failed')
+          setError(res.errors.join('\n') || 'unknown error')
+          return
+        }
       }
+      let newBaseline = baseline
+      if (designActions.length && baseline) {
+        const res = await conn.current.invoke<{ ok: boolean; errors: string[]; model: ProjectModel | null }>('Generate', baseline.path, designActions)
+        if (!res.ok || !res.model) {
+          setGenMsg('Generate failed')
+          setError(res.errors.join('\n') || 'unknown error')
+          return
+        }
+        newBaseline = res.model
+      }
+      if (designActions.length && newBaseline) setBaseline(newBaseline)
+      if (topoChanged && workingAssemblies) setAssemblies(workingAssemblies)
+      setJournal([])
+      setRedo([])
+      setRev((r) => r + 1)
+      setGenMsg('Generated ✓')
     } catch (e) {
       setGenMsg('')
       setError(String(e))
@@ -1608,27 +1727,7 @@ export default function App() {
             </button>
           </span>
         )}
-        {baseline && mode === 'topology' && (
-          <span className="edits">
-            <span className={'pending' + (topoJournal.length ? ' active' : '')}>
-              {topoJournal.length ? `${topoJournal.length} pending change${topoJournal.length > 1 ? 's' : ''}` : 'no changes'}
-            </span>
-            <button onClick={topoUndo} disabled={!topoJournal.length}>
-              Undo
-            </button>
-            <button onClick={topoRedoFn} disabled={!topoRedo.length}>
-              Redo
-            </button>
-            <button onClick={topoDiscard} disabled={!topoJournal.length}>
-              Discard
-            </button>
-            <button className="gen" onClick={topoGenerate} disabled={!topoJournal.length} title="Write the topology back to YAML">
-              Generate
-            </button>
-            {topoMsg && <span className="gen-msg">{topoMsg}</span>}
-          </span>
-        )}
-        {baseline && mode === 'design' && (
+        {baseline && (
           <span className="edits">
             <span className={'pending' + (journal.length ? ' active' : '')}>
               {journal.length ? `${journal.length} pending change${journal.length > 1 ? 's' : ''}` : 'no changes'}
@@ -1642,7 +1741,7 @@ export default function App() {
             <button onClick={discard} disabled={!journal.length} title="Discard all pending changes">
               Discard
             </button>
-            <button className="gen" onClick={generate} disabled={!journal.length} title="Write pending changes back to source">
+            <button className="gen" onClick={generate} disabled={!journal.length} title="Write all pending changes back (code + topology)">
               Generate
             </button>
             {genMsg && <span className="gen-msg">{genMsg}</span>}
@@ -1658,7 +1757,7 @@ export default function App() {
           ) : (
             <main className="topo-main">
               {error && <div className="error">{error}</div>}
-              <TopologyView assemblies={workingAssemblies} h={topoHandlers} />
+              <TopologyView assemblies={workingAssemblies} paramsOf={paramsOf} serviceTypes={serviceTypes} h={topoHandlers} />
             </main>
           )
         ) : (
