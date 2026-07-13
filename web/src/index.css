@@ -87,6 +87,35 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 }
 .topo-card:hover .topo-del { opacity: 1; }
 .topo-del:hover { background: #7f1d1d; color: #fecaca; }
+.topo-card-name { cursor: text; border-radius: 3px; padding: 0 2px; }
+.topo-card-name:hover { outline: 1px dashed #334155; }
+.topo-card-type { cursor: text; border-radius: 3px; padding: 0 2px; }
+.topo-card-type:hover { outline: 1px dashed #334155; }
+.topo-card .placeholder { opacity: 0.4; font-style: italic; }
+.topo-card .inline-edit {
+  font: inherit;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #2563eb;
+  border-radius: 3px;
+  padding: 0 2px;
+  min-width: 0;
+}
+.topo-card-name.inline-edit { flex: 1; }
+.topo-add {
+  width: 100%;
+  max-width: 240px;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px;
+  border: 1px dashed #334155;
+  border-radius: 8px;
+  background: transparent;
+  color: #93c5fd;
+  cursor: pointer;
+  margin-top: 2px;
+}
+.topo-add:hover { background: #172033; }
 
 /* topology — site drill-in (the model-instance diagram) */
 .topo-site-main { flex: 1; min-height: 0; display: flex; }
@@ -120,6 +149,16 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .topo-fnode.inst { border-left: 3px solid #1e3a8a; cursor: pointer; }
 .topo-fnode.inst.focused { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.45), 0 6px 20px rgba(0, 0, 0, 0.4); min-width: 190px; }
 .topo-fnode.service { border-left: 3px solid #14532d; }
+.topo-container-node {
+  padding: 3px 10px;
+  border: 1px solid #34d399;
+  border-radius: 10px;
+  background: #0e1526;
+  color: #34d399;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
 .topo-fnode-head { font-weight: 600; padding: 7px 10px 2px; }
 .topo-fnode-type { font-size: 11px; opacity: 0.5; padding: 0 10px 7px; }
 .topo-fnode .topo-props { padding: 0 10px 8px; margin: 0; }

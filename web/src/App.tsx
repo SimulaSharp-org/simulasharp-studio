@@ -37,6 +37,60 @@ type ServiceInstance = { name: string; type: string; config: Record<string, stri
 type SiteInstance = { name: string; maxEvents: number; models: ModelInstance[] }
 type AssemblyModel = { name: string; missionStart: string | null; services: ServiceInstance[]; sites: SiteInstance[]; path: string }
 
+// Topology edit journal (asm = the assembly file path). Renames/removes of a service cascade through the
+// instance tree's [ServiceRef] deps so the YAML never dangles.
+type TopoAction =
+  | { op: 'addSite'; asm: string; name: string }
+  | { op: 'removeSite'; asm: string; name: string }
+  | { op: 'renameSite'; asm: string; from: string; to: string }
+  | { op: 'addService'; asm: string; name: string; type: string }
+  | { op: 'removeService'; asm: string; name: string }
+  | { op: 'renameService'; asm: string; from: string; to: string }
+  | { op: 'setServiceType'; asm: string; name: string; type: string }
+
+const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
+  models.map((m) => ({
+    ...m,
+    deps: m.deps.map(fn).filter((d): d is DepBinding => d !== null),
+    containers: m.containers.map((c) => ({ ...c, children: mapDeps(c.children, fn) })),
+  }))
+
+function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
+  switch (a.op) {
+    case 'addSite':
+      return { ...asm, sites: [...asm.sites, { name: a.name, maxEvents: 64, models: [] }] }
+    case 'removeSite':
+      return { ...asm, sites: asm.sites.filter((s) => s.name !== a.name) }
+    case 'renameSite':
+      return { ...asm, sites: asm.sites.map((s) => (s.name === a.from ? { ...s, name: a.to } : s)) }
+    case 'addService':
+      return { ...asm, services: [...asm.services, { name: a.name, type: a.type, config: {}, deps: [] }] }
+    case 'removeService':
+      return {
+        ...asm,
+        services: asm.services.filter((s) => s.name !== a.name),
+        sites: asm.sites.map((s) => ({ ...s, models: mapDeps(s.models, (d) => (d.service === a.name ? null : d)) })),
+      }
+    case 'renameService':
+      return {
+        ...asm,
+        services: asm.services.map((s) => (s.name === a.from ? { ...s, name: a.to } : s)),
+        sites: asm.sites.map((s) => ({ ...s, models: mapDeps(s.models, (d) => (d.service === a.from ? { ...d, service: a.to } : d)) })),
+      }
+    case 'setServiceType':
+      return { ...asm, services: asm.services.map((s) => (s.name === a.name ? { ...s, type: a.type } : s)) }
+  }
+}
+
+const applyTopo = (assemblies: AssemblyModel[], a: TopoAction): AssemblyModel[] =>
+  assemblies.map((x) => (x.path === a.asm ? applyTopoToAsm(x, a) : x))
+
+const uniqueName = (base: string, taken: Set<string>) => {
+  let n = base
+  for (let i = 2; taken.has(n); i++) n = base + i
+  return n
+}
+
 type NsNode = { name: string; children: Map<string, NsNode>; types: DesignableType[] }
 
 // The Photino native-shell bridge (present only inside the desktop webview, not a plain browser).
@@ -908,10 +962,7 @@ function placeSide(side: Side, i: number, n: number) {
 
 // ── Topology view (top level: services | sites) + site drill-in ─────────────────
 
-const shortType = (t: string) => t.split('.').pop() ?? t
-
-// A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges, shows its
-// Config, and exposes one source handle per container so that container's child edges fan from a single point.
+// A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges and shows Config.
 function TopoInstanceNode({ data }: NodeProps) {
   const d = data as { inst: ModelInstance; focused: boolean }
   const inst = d.inst
@@ -920,18 +971,6 @@ function TopoInstanceNode({ data }: NodeProps) {
     <div className={'topo-fnode inst' + (d.focused ? ' focused' : '')}>
       <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
       <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
-      {d.focused &&
-        inst.containers.map((c, i) => (
-          <Handle
-            key={c.name}
-            id={'c' + i}
-            type="source"
-            position={Position.Bottom}
-            className="nh"
-            isConnectable={false}
-            style={{ left: `${((i + 1) / (inst.containers.length + 1)) * 100}%` }}
-          />
-        ))}
       <div className="topo-fnode-head">{inst.name}</div>
       <div className="topo-fnode-type">{inst.type}</div>
       {d.focused && config.length > 0 && (
@@ -947,13 +986,26 @@ function TopoInstanceNode({ data }: NodeProps) {
   )
 }
 
-const topoNodeTypes = { inst: TopoInstanceNode }
+// A container junction: a small labelled node between a focused instance and that container's children (React Flow
+// edges are point-to-point, so a container "fans" via this node rather than a single branching edge).
+function TopoContainerNode({ data }: NodeProps) {
+  const name = (data as { name: string }).name
+  return (
+    <div className="topo-container-node">
+      <Handle id="t" type="target" position={Position.Top} className="nh" isConnectable={false} />
+      <Handle id="b" type="source" position={Position.Bottom} className="nh" isConnectable={false} />
+      {name}
+    </div>
+  )
+}
 
-const cEdge = (id: string, source: string, target: string, sh: string, label?: string): Edge => ({
+const topoNodeTypes = { inst: TopoInstanceNode, container: TopoContainerNode }
+
+const gEdge = (id: string, source: string, target: string, label?: string): Edge => ({
   id,
   source,
   target,
-  sourceHandle: sh,
+  sourceHandle: 'b',
   targetHandle: 't',
   label,
   style: { stroke: EDGE_COLOR.Containment, strokeWidth: 1.5 },
@@ -964,8 +1016,8 @@ const cEdge = (id: string, source: string, target: string, sh: string, label?: s
   labelBgBorderRadius: 3,
 })
 
-// The site canvas: a containment tree. Children are merged (flat, unlabelled edges from one point) until their
-// parent is the focused node, when each container's edges fan from a per-container point and carry the container name.
+// The site canvas: a containment tree. Children are merged (flat, plain edges) until their parent is the focused
+// node, when each container becomes a small junction node (labelled by the container field) wiring to its children.
 function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | null): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = []
   const edges: Edge[] = []
@@ -979,14 +1031,19 @@ function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | 
     const focused = path === focus
     const childXs: number[] = []
     inst.containers.forEach((c, ci) => {
-      c.children.forEach((ch, j) => {
-        const r = walk(ch, path, depth + 1)
-        // focused → one fan per container from handle 'c<ci>', labelled once; merged → plain edge from 'b'.
-        edges.push(focused ? cEdge(`c:${id}>${r.id}`, id, r.id, 'c' + ci, j === 0 ? c.name : undefined) : cEdge(`c:${id}>${r.id}`, id, r.id, 'b'))
-        childXs.push(r.x)
-      })
+      const results = c.children.map((ch) => walk(ch, path, depth + 1))
+      results.forEach((r) => childXs.push(r.x))
+      if (focused && results.length) {
+        const cx = results.reduce((s, r) => s + r.x, 0) / results.length
+        const ctId = `ct:${path}:${ci}`
+        nodes.push({ id: ctId, type: 'container', position: { x: cx, y: depth * Y + Y * 0.5 }, data: { name: c.name } })
+        edges.push(gEdge(`e:${id}>${ctId}`, id, ctId)) // the junction node carries the container name
+        results.forEach((r) => edges.push(gEdge(`e:${ctId}>${r.id}`, ctId, r.id)))
+      } else {
+        results.forEach((r) => edges.push(gEdge(`e:${id}>${r.id}`, id, r.id)))
+      }
     })
-    const x = childXs.length ? (childXs[0] + childXs[childXs.length - 1]) / 2 : leaf++ * X
+    const x = childXs.length ? (Math.min(...childXs) + Math.max(...childXs)) / 2 : leaf++ * X
     nodes.push({ id, type: 'inst', position: { x, y: depth * Y }, data: { inst, focused } })
     return { id, x }
   }
@@ -1044,7 +1101,60 @@ function SiteView({ asm, site, onBack }: { asm: AssemblyModel; site: SiteInstanc
   )
 }
 
-function TopologyView({ assemblies, onOpenSite }: { assemblies: AssemblyModel[] | null; onOpenSite: (asm: AssemblyModel, s: SiteInstance) => void }) {
+// Inline click-to-edit text (Enter commits, Esc cancels). Stops propagation so it doesn't open the card.
+function EditableText({ value, onCommit, className, placeholder }: { value: string; onCommit: (v: string) => void; className: string; placeholder?: string }) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(value)
+  const cancelled = useRef(false)
+  if (!editing)
+    return (
+      <span
+        className={className}
+        title="click to edit"
+        onClick={(e) => {
+          e.stopPropagation()
+          setText(value)
+          cancelled.current = false
+          setEditing(true)
+        }}
+      >
+        {value || <span className="placeholder">{placeholder}</span>}
+      </span>
+    )
+  return (
+    <input
+      className={className + ' inline-edit'}
+      autoFocus
+      value={text}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        setEditing(false)
+        if (!cancelled.current && text.trim() && text.trim() !== value) onCommit(text.trim())
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+        else if (e.key === 'Escape') {
+          cancelled.current = true
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+    />
+  )
+}
+
+type TopoHandlers = {
+  onOpenSite: (asm: AssemblyModel, s: SiteInstance) => void
+  onAddSite: (asm: string) => void
+  onRemoveSite: (asm: string, name: string) => void
+  onRenameSite: (asm: string, from: string, to: string) => void
+  onAddService: (asm: string) => void
+  onRemoveService: (asm: string, name: string) => void
+  onRenameService: (asm: string, from: string, to: string) => void
+  onSetServiceType: (asm: string, name: string, type: string) => void
+}
+
+function TopologyView({ assemblies, h }: { assemblies: AssemblyModel[] | null; h: TopoHandlers }) {
   if (assemblies === null) return <div className="topo-empty">Loading topology…</div>
   if (!assemblies.length) return <div className="topo-empty">No assemblies (*.simassembly.yaml) registered in this project.</div>
   return (
@@ -1063,25 +1173,38 @@ function TopologyView({ assemblies, onOpenSite }: { assemblies: AssemblyModel[] 
               <div className="topo-col-title">Services · {a.services.length}</div>
               {a.services.map((s) => (
                 <div key={s.name} className="topo-card service">
-                  <span className="topo-card-name">{s.name}</span>
-                  <span className="topo-card-type">{shortType(s.type)}</span>
-                  <button className="topo-del" title="delete service">×</button>
+                  <EditableText className="topo-card-name" value={s.name} onCommit={(to) => h.onRenameService(a.path, s.name, to)} />
+                  <EditableText className="topo-card-type" value={s.type} placeholder="type…" onCommit={(t) => h.onSetServiceType(a.path, s.name, t)} />
+                  <button className="topo-del" title="delete service" onClick={() => h.onRemoveService(a.path, s.name)}>
+                    ×
+                  </button>
                 </div>
               ))}
-              {!a.services.length && <div className="topo-col-empty">no services</div>}
+              <button className="topo-add" onClick={() => h.onAddService(a.path)}>
+                + service
+              </button>
             </section>
 
             <section className="topo-col">
               <div className="topo-col-title">Sites · {a.sites.length}</div>
               {a.sites.map((site) => (
-                <div key={site.name} className="topo-card site" title="open site" onClick={() => onOpenSite(a, site)}>
-                  <span className="topo-card-name">{site.name}</span>
-                  <button className="topo-del" title="delete site" onClick={(e) => e.stopPropagation()}>
+                <div key={site.name} className="topo-card site" title="open site" onClick={() => h.onOpenSite(a, site)}>
+                  <EditableText className="topo-card-name" value={site.name} onCommit={(to) => h.onRenameSite(a.path, site.name, to)} />
+                  <button
+                    className="topo-del"
+                    title="delete site"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      h.onRemoveSite(a.path, site.name)
+                    }}
+                  >
                     ×
                   </button>
                 </div>
               ))}
-              {!a.sites.length && <div className="topo-col-empty">no sites</div>}
+              <button className="topo-add" onClick={() => h.onAddSite(a.path)}>
+                + site
+              </button>
             </section>
           </div>
         </div>
@@ -1104,8 +1227,11 @@ export default function App() {
   const [error, setError] = useState('')
   const [genMsg, setGenMsg] = useState('')
   const [mode, setMode] = useState<'design' | 'topology'>('design')
-  const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // null = not yet loaded
-  const [openSite, setOpenSite] = useState<{ asm: AssemblyModel; site: SiteInstance } | null>(null) // drilled-into site
+  const [assemblies, setAssemblies] = useState<AssemblyModel[] | null>(null) // topology baseline; null = not yet loaded
+  const [topoJournal, setTopoJournal] = useState<TopoAction[]>([])
+  const [topoRedo, setTopoRedo] = useState<TopoAction[]>([])
+  const [topoMsg, setTopoMsg] = useState('')
+  const [openSite, setOpenSite] = useState<{ asmPath: string; siteName: string } | null>(null) // drilled-into site
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
@@ -1130,6 +1256,9 @@ export default function App() {
     setRedo([])
     setRev(0)
     setAssemblies(null) // re-fetched lazily when the Topology tab is opened
+    setTopoJournal([])
+    setTopoRedo([])
+    setTopoMsg('')
     setOpenSite(null)
     try {
       setBaseline(await conn.current.invoke<ProjectModel>('OpenProject', p.trim()))
@@ -1150,6 +1279,76 @@ export default function App() {
       setError(String(e))
       setAssemblies([])
     }
+  }
+
+  // Working topology = baseline folded through the topology journal; the drilled-into site is resolved from it.
+  const workingAssemblies = useMemo(
+    () => (assemblies ? topoJournal.reduce(applyTopo, assemblies) : null),
+    [assemblies, topoJournal],
+  )
+  const drilledSite = useMemo(() => {
+    if (!openSite || !workingAssemblies) return null
+    const asm = workingAssemblies.find((x) => x.path === openSite.asmPath)
+    const site = asm?.sites.find((s) => s.name === openSite.siteName)
+    return asm && site ? { asm, site } : null
+  }, [openSite, workingAssemblies])
+
+  const topoDispatch = (a: TopoAction) => {
+    setTopoJournal((j) => [...j, a])
+    setTopoRedo([])
+    setTopoMsg('')
+  }
+  const topoUndo = () => {
+    if (!topoJournal.length) return
+    setTopoRedo([topoJournal[topoJournal.length - 1], ...topoRedo])
+    setTopoJournal(topoJournal.slice(0, -1))
+  }
+  const topoRedoFn = () => {
+    if (!topoRedo.length) return
+    setTopoJournal([...topoJournal, topoRedo[0]])
+    setTopoRedo(topoRedo.slice(1))
+  }
+  const topoDiscard = () => {
+    setTopoJournal([])
+    setTopoRedo([])
+  }
+
+  const topoGenerate = async () => {
+    if (!conn.current || !workingAssemblies || !topoJournal.length) return
+    setTopoMsg('Generating…')
+    setError('')
+    try {
+      const res = await conn.current.invoke<{ ok: boolean; errors: string[] }>('WriteAssemblies', workingAssemblies)
+      if (res.ok) {
+        setAssemblies(workingAssemblies)
+        setTopoJournal([])
+        setTopoRedo([])
+        setTopoMsg('Generated ✓')
+      } else {
+        setTopoMsg('Generate failed')
+        setError(res.errors.join('\n') || 'unknown error')
+      }
+    } catch (e) {
+      setTopoMsg('')
+      setError(String(e))
+    }
+  }
+
+  const topoHandlers: TopoHandlers = {
+    onOpenSite: (asm, site) => setOpenSite({ asmPath: asm.path, siteName: site.name }),
+    onAddSite: (asm) => {
+      const target = workingAssemblies?.find((x) => x.path === asm)
+      topoDispatch({ op: 'addSite', asm, name: uniqueName('Site', new Set(target?.sites.map((s) => s.name))) })
+    },
+    onRemoveSite: (asm, name) => topoDispatch({ op: 'removeSite', asm, name }),
+    onRenameSite: (asm, from, to) => from !== to && topoDispatch({ op: 'renameSite', asm, from, to }),
+    onAddService: (asm) => {
+      const target = workingAssemblies?.find((x) => x.path === asm)
+      topoDispatch({ op: 'addService', asm, name: uniqueName('Service', new Set(target?.services.map((s) => s.name))), type: '' })
+    },
+    onRemoveService: (asm, name) => topoDispatch({ op: 'removeService', asm, name }),
+    onRenameService: (asm, from, to) => from !== to && topoDispatch({ op: 'renameService', asm, from, to }),
+    onSetServiceType: (asm, name, type) => topoDispatch({ op: 'setServiceType', asm, name, type }),
   }
 
   // Edit commands. dispatch appends an action (clearing the redo stack); undo/redo/discard move
@@ -1409,6 +1608,26 @@ export default function App() {
             </button>
           </span>
         )}
+        {baseline && mode === 'topology' && (
+          <span className="edits">
+            <span className={'pending' + (topoJournal.length ? ' active' : '')}>
+              {topoJournal.length ? `${topoJournal.length} pending change${topoJournal.length > 1 ? 's' : ''}` : 'no changes'}
+            </span>
+            <button onClick={topoUndo} disabled={!topoJournal.length}>
+              Undo
+            </button>
+            <button onClick={topoRedoFn} disabled={!topoRedo.length}>
+              Redo
+            </button>
+            <button onClick={topoDiscard} disabled={!topoJournal.length}>
+              Discard
+            </button>
+            <button className="gen" onClick={topoGenerate} disabled={!topoJournal.length} title="Write the topology back to YAML">
+              Generate
+            </button>
+            {topoMsg && <span className="gen-msg">{topoMsg}</span>}
+          </span>
+        )}
         {baseline && mode === 'design' && (
           <span className="edits">
             <span className={'pending' + (journal.length ? ' active' : '')}>
@@ -1432,14 +1651,14 @@ export default function App() {
       </header>
       <div className="body">
         {mode === 'topology' ? (
-          openSite ? (
+          drilledSite ? (
             <main className="topo-site-main">
-              <SiteView asm={openSite.asm} site={openSite.site} onBack={() => setOpenSite(null)} />
+              <SiteView asm={drilledSite.asm} site={drilledSite.site} onBack={() => setOpenSite(null)} />
             </main>
           ) : (
             <main className="topo-main">
               {error && <div className="error">{error}</div>}
-              <TopologyView assemblies={assemblies} onOpenSite={(asm, site) => setOpenSite({ asm, site })} />
+              <TopologyView assemblies={workingAssemblies} h={topoHandlers} />
             </main>
           )
         ) : (

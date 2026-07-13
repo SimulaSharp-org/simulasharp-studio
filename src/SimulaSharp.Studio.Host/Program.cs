@@ -87,4 +87,7 @@ internal sealed class StudioHub : Hub
 
     /// <summary>Reads the project's *.simassembly.yaml topology files for the topology editor.</summary>
     public Task<IReadOnlyList<AssemblyModel>> OpenAssemblies(string path) => new AssemblyReader().ReadAsync(path);
+
+    /// <summary>Writes the edited topology models back to their *.simassembly.yaml files.</summary>
+    public Task<TopologyWriteResult> WriteAssemblies(AssemblyModel[] assemblies) => new TopologyGenerator().WriteAsync(assemblies);
 }
