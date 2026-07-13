@@ -56,8 +56,9 @@ public sealed class ProjectGenerator
                     _ => await ApplyToTypeBody(solution, projectId, a, ct).ConfigureAwait(false),
                 };
 
-            // Normalize the physical layout (one type per file, directory mirrors namespace) before verifying, so the
-            // committed layout is what we compile-check.
+            // Drop `using`s pointing at namespaces that no longer exist (e.g. a namespace emptied by moving its last
+            // type out) so they don't dangle as CS0234, then normalize the physical layout.
+            solution = await PruneDanglingUsingsAsync(solution, projectId, ct).ConfigureAwait(false);
             solution = await LayoutNormalizer.NormalizeAsync(solution, projectId, ct).ConfigureAwait(false);
 
             // Verify: recompile and refuse to write only if the edit *introduced* errors — a pre-existing error (the
@@ -224,8 +225,56 @@ public sealed class ProjectGenerator
     {
         var compilation = await solution.GetProject(projectId)!.GetCompilationAsync(ct).ConfigureAwait(false)
                           ?? throw new InvalidOperationException("Could not recompile the project.");
-        return compilation.GetTypeByMetadataName(typeKey)
-               ?? throw new InvalidOperationException($"Type '{typeKey}' not found in the project.");
+        if (compilation.GetTypeByMetadataName(typeKey) is { } type) return type;
+
+        // Diagnose: list every project type with the same simple name — reveals a namespace mismatch or a duplicate
+        // (a duplicate makes GetTypeByMetadataName return null as ambiguous).
+        string simple = typeKey.Contains('.') ? typeKey[(typeKey.LastIndexOf('.') + 1)..] : typeKey;
+        var same = AllTypes(compilation.Assembly.GlobalNamespace).Where(t => t.Name == simple).Select(t => t.ToDisplayString()).ToList();
+        string hint = same.Count == 0 ? "no type by that name exists" : $"found by name: {string.Join(", ", same)}";
+        throw new InvalidOperationException($"Type '{typeKey}' not found in the project ({hint}).");
+    }
+
+    private static IEnumerable<INamedTypeSymbol> AllTypes(INamespaceSymbol ns)
+    {
+        foreach (var t in ns.GetTypeMembers()) yield return t;
+        foreach (var child in ns.GetNamespaceMembers())
+            foreach (var t in AllTypes(child))
+                yield return t;
+    }
+
+    /// <summary>Removes plain <c>using Ns;</c> directives whose namespace no longer exists in the compilation (a
+    /// namespace with no types isn't a symbol, so such a using would fail as CS0234).</summary>
+    private static async Task<Solution> PruneDanglingUsingsAsync(Solution solution, ProjectId projectId, CancellationToken ct)
+    {
+        var compilation = await solution.GetProject(projectId)!.GetCompilationAsync(ct).ConfigureAwait(false);
+        if (compilation is null) return solution;
+
+        foreach (var docId in solution.GetProject(projectId)!.DocumentIds)
+        {
+            var doc = solution.GetDocument(docId)!;
+            if (doc.FilePath?.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) ?? true) continue;
+            if (await doc.GetSyntaxRootAsync(ct).ConfigureAwait(false) is not CompilationUnitSyntax root || root.Usings.Count == 0) continue;
+
+            var dangling = root.Usings
+                .Where(u => u is { StaticKeyword.RawKind: 0, Alias: null, Name: { } n } && !NamespaceExists(compilation, n.ToString()))
+                .ToList();
+            if (dangling.Count == 0) continue;
+
+            solution = solution.WithDocumentSyntaxRoot(docId, root.RemoveNodes(dangling, SyntaxRemoveOptions.KeepNoTrivia)!);
+        }
+        return solution;
+    }
+
+    private static bool NamespaceExists(Compilation compilation, string ns)
+    {
+        INamespaceSymbol? current = compilation.GlobalNamespace;
+        foreach (var seg in ns.Split('.'))
+        {
+            current = current.GetNamespaceMembers().FirstOrDefault(n => n.Name == seg);
+            if (current is null) return false;
+        }
+        return true;
     }
 
     /// <summary>A minimal, compilable skeleton for a freshly added type of the given kind.</summary>
@@ -241,7 +290,8 @@ public sealed class ProjectGenerator
             "Interface" => $"public interface {name}\n{{\n}}\n",
             _ => $"public class {name}\n{{\n}}\n",
         };
-        return $"{usings}namespace {ns};\n\n{body}";
+        string nsDecl = string.IsNullOrEmpty(ns) ? "" : $"namespace {ns};\n\n"; // a global-namespace type has no declaration
+        return $"{usings}{nsDecl}{body}";
     }
 
     // ── Commit (added / changed files written, removed files deleted) ────────────
