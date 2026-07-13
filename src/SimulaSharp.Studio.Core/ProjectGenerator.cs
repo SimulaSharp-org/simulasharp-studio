@@ -1,17 +1,21 @@
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.Rename;
+using Microsoft.CodeAnalysis.Text;
 
 namespace SimulaSharp.Studio.Core;
 
 /// <summary>
 /// Replays a journal of <see cref="EditAction"/>s back into a project's source (the Generate step). The apply is
 /// transactional and verify-first: edits are made against an in-memory Roslyn solution, the result is recompiled, and
-/// files are only written to disk if the edited project still compiles clean — so a rejected edit leaves the source
-/// untouched. On success the freshly re-derived IR is returned so the SPA can rebase onto it.
+/// files are only written (added / changed / deleted) if the edited project still compiles clean — so a rejected edit
+/// leaves the source untouched. On success the freshly re-derived IR is returned so the SPA can rebase onto it.
 /// <para>
-/// This slice proves the pipeline end-to-end for one action kind (<c>removeMember</c>); breadth of ops, per-document
-/// (rather than per-type) grouping, and the relocatable-copy sandbox for out-of-project vendored deps follow.
+/// Member and association actions edit a type's body; type actions (<c>addType</c> / <c>renameType</c> /
+/// <c>removeType</c>) work at the solution level (a new file, a solution-wide rename, a file/declaration removal).
+/// Actions are applied strictly in journal order, recompiling to re-resolve symbols after each solution-shaping step.
 /// </para>
 /// </summary>
 public sealed class ProjectGenerator
@@ -31,22 +35,26 @@ public sealed class ProjectGenerator
         {
             using var workspace = MSBuildWorkspace.Create();
             var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: ct).ConfigureAwait(false);
+            var originalSolution = project.Solution;
+            var projectId = project.Id;
             var baseCompilation = await project.GetCompilationAsync(ct).ConfigureAwait(false)
                                   ?? throw new InvalidOperationException($"Could not compile project '{projectPath}'.");
 
-            // Apply all actions, grouped by their target type, onto an in-memory solution.
-            var solution = project.Solution;
-            foreach (var group in actions.GroupBy(a => a.TypeKey))
-            {
-                var type = baseCompilation.GetTypeByMetadataName(group.Key)
-                           ?? throw new InvalidOperationException($"Type '{group.Key}' not found in the project.");
-                solution = await SourceEditor.ApplyToTypeAsync(solution, type, group.ToList(), ct).ConfigureAwait(false);
-            }
+            // Apply in journal order. Type actions reshape the solution; member/association actions edit a type body.
+            var solution = originalSolution;
+            foreach (var a in actions)
+                solution = a.Op switch
+                {
+                    "addType" => AddType(solution, projectId, a),
+                    "renameType" => await RenameType(solution, projectId, a, ct).ConfigureAwait(false),
+                    "removeType" => await RemoveType(solution, projectId, a, ct).ConfigureAwait(false),
+                    _ => await ApplyToTypeBody(solution, projectId, a, ct).ConfigureAwait(false),
+                };
 
-            // Verify: recompile the edited project and refuse to write only if the edit *introduced* errors — a
-            // pre-existing error (the project may be mid-edit) shouldn't block an unrelated change. Compared by
-            // id+message so shifted line numbers don't read as new errors.
-            var editedProject = solution.GetProject(project.Id)!;
+            // Verify: recompile and refuse to write only if the edit *introduced* errors — a pre-existing error (the
+            // project may be mid-edit) shouldn't block an unrelated change. Compared by id+file+message so a shifted
+            // line number doesn't read as a new error.
+            var editedProject = solution.GetProject(projectId)!;
             var editedCompilation = await editedProject.GetCompilationAsync(ct).ConfigureAwait(false)
                                     ?? throw new InvalidOperationException("Could not recompile the edited project.");
             var before = baseCompilation.GetDiagnostics(ct)
@@ -59,17 +67,7 @@ public sealed class ProjectGenerator
                 .ToList();
             if (introduced.Count > 0) return new GenerateResult(false, introduced, null);
 
-            // Commit: write each changed document to disk (LF, matching the repo convention).
-            foreach (var change in solution.GetChanges(project.Solution).GetProjectChanges())
-                foreach (var docId in change.GetChangedDocuments())
-                {
-                    var doc = solution.GetDocument(docId)!;
-                    if (doc.FilePath is not { } filePath) continue;
-                    var text = await doc.GetTextAsync(ct).ConfigureAwait(false);
-                    await File.WriteAllTextAsync(filePath, text.ToString().Replace("\r\n", "\n"),
-                        text.Encoding ?? Encoding.UTF8, ct).ConfigureAwait(false);
-                }
-
+            await CommitAsync(solution, originalSolution, projectId, ct).ConfigureAwait(false);
             return new GenerateResult(true, [], ProjectWorkspace.BuildModel(editedProject.Name, projectPath, editedCompilation));
         }
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
@@ -77,6 +75,105 @@ public sealed class ProjectGenerator
             return new GenerateResult(false, [ex.Message], null);
         }
     }
+
+    // ── Member / association actions (edit a type body) ─────────────────────────
+
+    private static async Task<Solution> ApplyToTypeBody(Solution solution, ProjectId projectId, EditAction a, CancellationToken ct)
+    {
+        var type = await ResolveType(solution, projectId, a.TypeKey, ct).ConfigureAwait(false);
+        return await SourceEditor.ApplyToTypeAsync(solution, type, [a], ct).ConfigureAwait(false);
+    }
+
+    // ── Type actions (reshape the solution) ─────────────────────────────────────
+
+    private static Solution AddType(Solution solution, ProjectId projectId, EditAction a)
+    {
+        var project = solution.GetProject(projectId)!;
+        string dir = Path.GetDirectoryName(project.FilePath)
+                     ?? throw new InvalidOperationException("The project has no directory to add a file to.");
+        string ns = NamespaceOf(a.TypeKey), name = NameOf(a.TypeKey);
+        string filePath = Path.Combine(dir, name + ".cs");
+        if (File.Exists(filePath) || project.Documents.Any(d => string.Equals(d.FilePath, filePath, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"A file '{name}.cs' already exists — rename the type or move the file first.");
+
+        var text = SourceText.From(TypeSkeleton(ns, name, a.Kind ?? "Other"), Encoding.UTF8);
+        return solution.AddDocument(DocumentId.CreateNewId(projectId), name + ".cs", text, filePath: filePath);
+    }
+
+    private static async Task<Solution> RenameType(Solution solution, ProjectId projectId, EditAction a, CancellationToken ct)
+    {
+        var type = await ResolveType(solution, projectId, a.TypeKey, ct).ConfigureAwait(false);
+        string newName = a.To ?? throw new InvalidOperationException("renameType needs a new name.");
+        return await Renamer.RenameSymbolAsync(solution, type, new SymbolRenameOptions(), newName, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<Solution> RemoveType(Solution solution, ProjectId projectId, EditAction a, CancellationToken ct)
+    {
+        var type = await ResolveType(solution, projectId, a.TypeKey, ct).ConfigureAwait(false);
+        var syntaxRef = type.DeclaringSyntaxReferences.FirstOrDefault(r =>
+                            !r.SyntaxTree.FilePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase))
+                        ?? throw new InvalidOperationException($"No editable source for type '{type.Name}'.");
+        var document = solution.GetDocument(syntaxRef.SyntaxTree)!;
+        var root = (await document.GetSyntaxRootAsync(ct).ConfigureAwait(false))!;
+        var decl = await syntaxRef.GetSyntaxAsync(ct).ConfigureAwait(false);
+
+        // Delete the whole file when this was its only type; otherwise cut just the declaration.
+        bool onlyType = !root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>().Any(t => t != decl);
+        if (onlyType) return solution.RemoveDocument(document.Id);
+
+        var newRoot = root.RemoveNode(decl, SyntaxRemoveOptions.KeepNoTrivia)!;
+        return solution.WithDocumentSyntaxRoot(document.Id, newRoot);
+    }
+
+    private static async Task<INamedTypeSymbol> ResolveType(Solution solution, ProjectId projectId, string typeKey, CancellationToken ct)
+    {
+        var compilation = await solution.GetProject(projectId)!.GetCompilationAsync(ct).ConfigureAwait(false)
+                          ?? throw new InvalidOperationException("Could not recompile the project.");
+        return compilation.GetTypeByMetadataName(typeKey)
+               ?? throw new InvalidOperationException($"Type '{typeKey}' not found in the project.");
+    }
+
+    /// <summary>A minimal, compilable skeleton for a freshly added type of the given kind.</summary>
+    private static string TypeSkeleton(string ns, string name, string kind)
+    {
+        string usings = kind is "Model" or "Service"
+            ? "using SimulaSharp.Kernel.Logging;\nusing SimulaSharp.Kernel.Model;\nusing SimulaSharp.Kernel.Services;\n\n"
+            : "";
+        string body = kind switch
+        {
+            "Model" => $"public partial class {name}(IClock c, IScheduler s, ILogger l) : ModelBase(c, s, l)\n{{\n}}\n",
+            "Service" => $"public partial class {name}(IClock c, ILogger l) : ServiceBase(c, l, \"{name}\")\n{{\n}}\n",
+            "Interface" => $"public interface {name}\n{{\n}}\n",
+            _ => $"public class {name}\n{{\n}}\n",
+        };
+        return $"{usings}namespace {ns};\n\n{body}";
+    }
+
+    // ── Commit (added / changed files written, removed files deleted) ────────────
+
+    private static async Task CommitAsync(Solution solution, Solution originalSolution, ProjectId projectId, CancellationToken ct)
+    {
+        var perProject = solution.GetChanges(originalSolution).GetProjectChanges().Where(pc => pc.ProjectId == projectId).ToList();
+        if (perProject.Count == 0) return;
+        var changes = perProject[0];
+
+        foreach (var id in changes.GetRemovedDocuments())
+            if (originalSolution.GetDocument(id)?.FilePath is { } path && File.Exists(path))
+                File.Delete(path);
+
+        foreach (var id in changes.GetAddedDocuments().Concat(changes.GetChangedDocuments()))
+        {
+            var doc = solution.GetDocument(id)!;
+            if (doc.FilePath is not { } filePath) continue;
+            var text = await doc.GetTextAsync(ct).ConfigureAwait(false);
+            // LF, matching the repo convention.
+            await File.WriteAllTextAsync(filePath, text.ToString().Replace("\r\n", "\n"), text.Encoding ?? Encoding.UTF8, ct)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static string NamespaceOf(string typeKey) { int d = typeKey.LastIndexOf('.'); return d < 0 ? "" : typeKey[..d]; }
+    private static string NameOf(string typeKey) { int d = typeKey.LastIndexOf('.'); return d < 0 ? typeKey : typeKey[(d + 1)..]; }
 
     /// <summary>A location-independent identity for a diagnostic, so a pre-existing error still matches after edits
     /// shift its line number.</summary>

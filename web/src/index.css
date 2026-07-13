@@ -70,7 +70,103 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 }
 
 .tree { padding: 6px 0; font-size: 14px; }
-.proj { padding: 4px 10px; opacity: 0.6; font-size: 12px; }
+.proj { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; }
+.proj > span { opacity: 0.6; flex: 1; }
+.new-type-top {
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px dashed #334155;
+  background: transparent;
+  color: #93c5fd;
+  cursor: pointer;
+}
+.new-type-top:hover { background: #172033; }
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #2563eb;
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* right-click context menu */
+.ctx-backdrop { position: fixed; inset: 0; z-index: 50; }
+.ctx-menu {
+  position: fixed;
+  min-width: 160px;
+  padding: 4px;
+  background: #0e1526;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.ctx-menu button {
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #dbeafe;
+  cursor: pointer;
+}
+.ctx-menu button:hover { background: #172033; }
+.ctx-menu button.danger { color: #fca5a5; }
+.ctx-menu button.danger:hover { background: #450a0a; }
+
+/* modal (New Type) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal {
+  min-width: 340px;
+  padding: 16px;
+  background: #0e1526;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal-title { font-weight: 600; font-size: 15px; }
+.modal select,
+.modal input {
+  font: inherit;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+.nt-key {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.nt-stable { opacity: 0.6; font-size: 13px; white-space: nowrap; }
+.nt-declared { flex: 1; min-width: 0; border: none !important; background: transparent !important; padding: 6px 2px !important; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.modal-actions button { font-size: 13px; padding: 5px 14px; border-radius: 4px; cursor: pointer; }
 
 .row {
   display: flex;

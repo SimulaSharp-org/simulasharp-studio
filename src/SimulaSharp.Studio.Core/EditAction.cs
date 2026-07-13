@@ -17,6 +17,9 @@ public sealed record AssocDto(string Kind, string Name, string Target);
 ///   <item><c>addAssociation</c>: <paramref name="Assoc"/>.</item>
 ///   <item><c>renameAssociation</c>: <paramref name="Ref"/> + <paramref name="To"/>.</item>
 ///   <item><c>removeAssociation</c>: <paramref name="Ref"/>.</item>
+///   <item><c>addType</c>: <paramref name="TypeKey"/> (the new full name) + <paramref name="Kind"/>.</item>
+///   <item><c>renameType</c>: <paramref name="TypeKey"/> + <paramref name="To"/> (the new simple name).</item>
+///   <item><c>removeType</c>: <paramref name="TypeKey"/>.</item>
 /// </list>
 /// </summary>
 public sealed record EditAction(
@@ -26,7 +29,8 @@ public sealed record EditAction(
     MemberDto? Member = null,
     AssocDto? Assoc = null,
     AssocDto? Ref = null,
-    string? To = null);
+    string? To = null,
+    string? Kind = null);
 
 /// <summary>The outcome of a Generate: on success the freshly re-derived IR; on failure the blocking errors.</summary>
 public sealed record GenerateResult(bool Ok, IReadOnlyList<string> Errors, ProjectModel? Model);

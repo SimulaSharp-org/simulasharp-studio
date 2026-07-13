@@ -82,6 +82,9 @@ const FACETS_BY_KIND: Record<string, string[]> = {
 // action" and discard is "empty the journal". The same journal is what a later Generate step replays
 // through Roslyn to write the edits back to source.
 
+// Body actions edit a type's members/associations; type actions reshape the set of types. A namespace
+// gesture (delete a folder) expands, at the moment it's performed, into concrete atomic type actions
+// frozen inside an ActionList — one undo unit that survives snapshot save/load and replays deterministically.
 type Action =
   | { op: 'addMember'; typeKey: string; member: MemberRow }
   | { op: 'updateMember'; typeKey: string; name: string; member: MemberRow }
@@ -89,6 +92,14 @@ type Action =
   | { op: 'addAssociation'; typeKey: string; assoc: Association }
   | { op: 'renameAssociation'; typeKey: string; ref: Association; to: string }
   | { op: 'removeAssociation'; typeKey: string; ref: Association }
+  | { op: 'addType'; typeKey: string; kind: string }
+  | { op: 'renameType'; typeKey: string; to: string }
+  | { op: 'removeType'; typeKey: string }
+type ActionList = { op: 'bundle'; label: string; actions: Action[] }
+type Entry = Action | ActionList
+
+const nsOf = (typeKey: string) => (typeKey.includes('.') ? typeKey.slice(0, typeKey.lastIndexOf('.')) : '')
+const nameOf = (typeKey: string) => (typeKey.includes('.') ? typeKey.slice(typeKey.lastIndexOf('.') + 1) : typeKey)
 
 // An association is identified by its (kind, target, name) triple — stable enough since identical
 // triples are de-duplicated when the graph is built.
@@ -108,12 +119,39 @@ function applyToType(t: DesignableType, a: Action): DesignableType {
       return { ...t, associations: t.associations.map((x) => (sameAssoc(x, a.ref) ? { ...x, name: a.to } : x)) }
     case 'removeAssociation':
       return { ...t, associations: t.associations.filter((x) => !sameAssoc(x, a.ref)) }
+    default:
+      return t
   }
 }
 
 function applyAction(model: ProjectModel, a: Action): ProjectModel {
-  return { ...model, types: model.types.map((t) => (key(t) === a.typeKey ? applyToType(t, a) : t)) }
+  switch (a.op) {
+    case 'addType':
+      return { ...model, types: [...model.types, { namespace: nsOf(a.typeKey), name: nameOf(a.typeKey), kind: a.kind, members: [], associations: [] }] }
+    case 'removeType':
+      return { ...model, types: model.types.filter((t) => key(t) !== a.typeKey) }
+    case 'renameType': {
+      const newKey = nsOf(a.typeKey) ? nsOf(a.typeKey) + '.' + a.to : a.to
+      return {
+        ...model,
+        types: model.types.map((t) => {
+          const renamed = key(t) === a.typeKey ? { ...t, name: a.to } : t
+          // keep association edges pointing at the renamed type resolvable
+          return { ...renamed, associations: renamed.associations.map((x) => (x.target === a.typeKey ? { ...x, target: newKey } : x)) }
+        }),
+      }
+    }
+    default:
+      return { ...model, types: model.types.map((t) => (key(t) === a.typeKey ? applyToType(t, a) : t)) }
+  }
 }
+
+function applyEntry(model: ProjectModel, entry: Entry): ProjectModel {
+  return entry.op === 'bundle' ? entry.actions.reduce(applyAction, model) : applyAction(model, entry)
+}
+
+// Flatten a journal to the atomic action stream the backend applies (ActionLists spliced in order).
+const flatten = (journal: Entry[]): Action[] => journal.flatMap((e) => (e.op === 'bundle' ? e.actions : [e]))
 
 // ── Left tree ─────────────────────────────────────────────────────────────────
 
@@ -134,15 +172,27 @@ function buildTree(types: DesignableType[]): NsNode {
   return root
 }
 
-type TreeProps = { onSelect: (key: string) => void; selectedKey: string | null }
+type TreeProps = {
+  onSelect: (key: string) => void
+  selectedKey: string | null
+  onContext: (e: React.MouseEvent, kind: 'type' | 'ns', target: string) => void
+  renamingKey: string | null
+  onRenameType: (typeKey: string, to: string) => void
+  onRenameCancel: () => void
+}
 
-function NsFolder({ node, depth, ...p }: { node: NsNode; depth: number } & TreeProps) {
+function NsFolder({ node, depth, ns, ...p }: { node: NsNode; depth: number; ns: string } & TreeProps) {
   const [open, setOpen] = useState(false)
   const folders = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name))
   const types = [...node.types].sort(byKindThenName)
   return (
     <div>
-      <div className="row folder" style={{ paddingLeft: depth * 14 + 6 }} onClick={() => setOpen((o) => !o)}>
+      <div
+        className="row folder"
+        style={{ paddingLeft: depth * 14 + 6 }}
+        onClick={() => setOpen((o) => !o)}
+        onContextMenu={(e) => p.onContext(e, 'ns', ns)}
+      >
         <span className="chev">{open ? '▾' : '▸'}</span>
         <span className="folder-badge">N</span>
         <span className="row-label">{node.name}</span>
@@ -150,7 +200,7 @@ function NsFolder({ node, depth, ...p }: { node: NsNode; depth: number } & TreeP
       {open && (
         <>
           {folders.map((c) => (
-            <NsFolder key={c.name} node={c} depth={depth + 1} {...p} />
+            <NsFolder key={c.name} node={c} depth={depth + 1} ns={ns + '.' + c.name} {...p} />
           ))}
           {types.map((t) => (
             <TypeRow key={t.name} t={t} depth={depth + 1} {...p} />
@@ -161,18 +211,78 @@ function NsFolder({ node, depth, ...p }: { node: NsNode; depth: number } & TreeP
   )
 }
 
-function TypeRow({ t, depth, onSelect, selectedKey }: { t: DesignableType; depth: number } & TreeProps) {
-  const selected = key(t) === selectedKey
+function TypeRow({ t, depth, onSelect, selectedKey, onContext, renamingKey, onRenameType, onRenameCancel }: { t: DesignableType; depth: number } & TreeProps) {
+  const k = key(t)
+  const selected = k === selectedKey
+  const renaming = k === renamingKey
   return (
     <div
       className={'row type' + (selected ? ' selected' : '')}
       style={{ paddingLeft: depth * 14 + 24 }}
-      onClick={() => onSelect(key(t))}
+      onClick={() => !renaming && onSelect(k)}
+      onContextMenu={(e) => onContext(e, 'type', k)}
     >
       <span className={'badge k-' + t.kind} title={t.kind}>
         {shortKind(t.kind)}
       </span>
-      <span className="row-label">{t.name}</span>
+      {renaming ? (
+        <input
+          className="rename-input"
+          autoFocus
+          defaultValue={t.name}
+          onClick={(e) => e.stopPropagation()}
+          onBlur={onRenameCancel}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onRenameType(k, (e.target as HTMLInputElement).value)
+            else if (e.key === 'Escape') onRenameCancel()
+          }}
+        />
+      ) : (
+        <span className="row-label">{t.name}</span>
+      )}
+    </div>
+  )
+}
+
+// ── Tree context menu + New Type dialog ───────────────────────────────────────────
+
+function NewTypeDialog({ stable, onCreate, onCancel }: { stable: string; onCreate: (typeKey: string, kind: string) => void; onCancel: () => void }) {
+  const [declared, setDeclared] = useState('')
+  const [kind, setKind] = useState('Model')
+  const d = declared.trim()
+  const valid = d.length > 0 && !d.startsWith('.') && !d.endsWith('.')
+  const fullKey = stable ? stable + '.' + d : d
+  const create = () => valid && onCreate(fullKey, kind)
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">New type</div>
+        <div className="nt-key">
+          {stable && <span className="nt-stable">{stable}.</span>}
+          <input
+            className="nt-declared"
+            autoFocus
+            placeholder="Name  (or Sub.Name to nest)"
+            value={declared}
+            onChange={(e) => setDeclared(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && create()}
+          />
+        </div>
+        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="Model">Model</option>
+          <option value="Service">Service</option>
+          <option value="Interface">Interface</option>
+          <option value="Other">Other (plain class)</option>
+        </select>
+        <div className="modal-actions">
+          <button className="mf-save" disabled={!valid} onClick={create}>
+            Create
+          </button>
+          <button className="mf-cancel" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -680,15 +790,18 @@ export default function App() {
   const conn = useRef<signalR.HubConnection | null>(null)
   const [connected, setConnected] = useState(false)
   const [baseline, setBaseline] = useState<ProjectModel | null>(null)
-  const [journal, setJournal] = useState<Action[]>([])
-  const [redo, setRedo] = useState<Action[]>([])
+  const [journal, setJournal] = useState<Entry[]>([])
+  const [redo, setRedo] = useState<Entry[]>([])
   const [rev, setRev] = useState(0) // bumps on every working-IR change; re-keys the canvas so the box re-renders
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [genMsg, setGenMsg] = useState('')
+  const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
+  const [renamingKey, setRenamingKey] = useState<string | null>(null)
+  const [newTypeNs, setNewTypeNs] = useState<string | null>(null) // stable prefix for the New Type dialog
 
-  const working = useMemo(() => (baseline ? journal.reduce(applyAction, baseline) : null), [baseline, journal])
+  const working = useMemo(() => (baseline ? journal.reduce(applyEntry, baseline) : null), [baseline, journal])
   const selected = useMemo(
     () => working?.types.find((t) => key(t) === selectedKey) ?? null,
     [working, selectedKey],
@@ -715,7 +828,7 @@ export default function App() {
 
   // Edit commands. dispatch appends an action (clearing the redo stack); undo/redo/discard move
   // between journal and redo. Every one bumps rev so the (uncontrolled) canvas remounts and re-reads.
-  const dispatch = (a: Action) => {
+  const dispatch = (a: Entry) => {
     setJournal((j) => [...j, a])
     setRedo([])
     setRev((r) => r + 1)
@@ -750,7 +863,7 @@ export default function App() {
       const res = await conn.current.invoke<{ ok: boolean; errors: string[]; model: ProjectModel | null }>(
         'Generate',
         baseline.path,
-        journal,
+        flatten(journal),
       )
       if (res.ok && res.model) {
         setBaseline(res.model)
@@ -796,6 +909,45 @@ export default function App() {
   const onDeleteAssoc = (ref: Association) => {
     if (!selectedKey) return
     dispatch({ op: 'removeAssociation', typeKey: selectedKey, ref })
+  }
+
+  // ── Tree ops (types + namespaces) ─────────────────────────────────────────────
+
+  const onContext = (e: React.MouseEvent, kind: 'type' | 'ns', target: string) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ x: e.clientX, y: e.clientY, kind, target })
+  }
+
+  const onRenameType = (typeKey: string, to: string) => {
+    setRenamingKey(null)
+    const t = to.trim()
+    if (!t || t === nameOf(typeKey)) return
+    const newKey = nsOf(typeKey) ? nsOf(typeKey) + '.' + t : t
+    if (working?.types.some((x) => key(x) === newKey)) return // name collision
+    dispatch({ op: 'renameType', typeKey, to: t })
+    if (selectedKey === typeKey) setSelectedKey(newKey)
+  }
+
+  const onRenameCancel = () => setRenamingKey(null)
+
+  const onRemoveType = (typeKey: string) => {
+    dispatch({ op: 'removeType', typeKey })
+    if (selectedKey === typeKey) setSelectedKey(null)
+  }
+
+  const onDeleteNamespace = (ns: string) => {
+    const victims = (working?.types ?? []).filter((t) => t.namespace === ns || t.namespace.startsWith(ns + '.'))
+    if (!victims.length) return
+    dispatch({ op: 'bundle', label: `Delete namespace ${ns}`, actions: victims.map((t) => ({ op: 'removeType', typeKey: key(t) })) })
+    if (selectedKey && victims.some((t) => key(t) === selectedKey)) setSelectedKey(null)
+  }
+
+  const onNewType = (typeKey: string, kind: string) => {
+    setNewTypeNs(null)
+    if (working?.types.some((t) => key(t) === typeKey)) return // collision
+    dispatch({ op: 'addType', typeKey, kind })
+    setSelectedKey(typeKey)
   }
 
   useEffect(() => {
@@ -891,15 +1043,41 @@ export default function App() {
           {working && (
             <div className="tree">
               <div className="proj">
-                {working.name} — {working.types.length} types
+                <span>
+                  {working.name} — {working.types.length} types
+                </span>
+                <button className="new-type-top" title="New top-level type" onClick={() => setNewTypeNs('')}>
+                  + type
+                </button>
               </div>
               {[...root.children.values()]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((c) => (
-                  <NsFolder key={c.name} node={c} depth={0} onSelect={setSelectedKey} selectedKey={selectedKey} />
+                  <NsFolder
+                    key={c.name}
+                    node={c}
+                    depth={0}
+                    ns={c.name}
+                    onSelect={setSelectedKey}
+                    selectedKey={selectedKey}
+                    onContext={onContext}
+                    renamingKey={renamingKey}
+                    onRenameType={onRenameType}
+                    onRenameCancel={onRenameCancel}
+                  />
                 ))}
               {[...root.types].sort(byKindThenName).map((t) => (
-                <TypeRow key={t.name} t={t} depth={0} onSelect={setSelectedKey} selectedKey={selectedKey} />
+                <TypeRow
+                  key={t.name}
+                  t={t}
+                  depth={0}
+                  onSelect={setSelectedKey}
+                  selectedKey={selectedKey}
+                  onContext={onContext}
+                  renamingKey={renamingKey}
+                  onRenameType={onRenameType}
+                  onRenameCancel={onRenameCancel}
+                />
               ))}
             </div>
           )}
@@ -922,6 +1100,33 @@ export default function App() {
           </ReactFlow>
         </main>
       </div>
+
+      {menu && (
+        <div
+          className="ctx-backdrop"
+          onClick={() => setMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setMenu(null)
+          }}
+        >
+          <div className="ctx-menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
+            {menu.kind === 'type' ? (
+              <>
+                <button onClick={() => { setRenamingKey(menu.target); setMenu(null) }}>Rename</button>
+                <button className="danger" onClick={() => { onRemoveType(menu.target); setMenu(null) }}>Delete</button>
+              </>
+            ) : (
+              <>
+                <button onClick={() => { setNewTypeNs(menu.target); setMenu(null) }}>New type…</button>
+                <button className="danger" onClick={() => { onDeleteNamespace(menu.target); setMenu(null) }}>Delete namespace…</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {newTypeNs !== null && <NewTypeDialog stable={newTypeNs} onCreate={onNewType} onCancel={() => setNewTypeNs(null)} />}
     </div>
   )
 }
