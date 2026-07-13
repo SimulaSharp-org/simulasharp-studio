@@ -43,15 +43,21 @@ public sealed class ProjectGenerator
                 solution = await SourceEditor.ApplyToTypeAsync(solution, type, group.ToList(), ct).ConfigureAwait(false);
             }
 
-            // Verify: recompile the edited project and refuse to write if the edit introduced errors.
+            // Verify: recompile the edited project and refuse to write only if the edit *introduced* errors — a
+            // pre-existing error (the project may be mid-edit) shouldn't block an unrelated change. Compared by
+            // id+message so shifted line numbers don't read as new errors.
             var editedProject = solution.GetProject(project.Id)!;
             var editedCompilation = await editedProject.GetCompilationAsync(ct).ConfigureAwait(false)
                                     ?? throw new InvalidOperationException("Could not recompile the edited project.");
-            var errors = editedCompilation.GetDiagnostics(ct)
+            var before = baseCompilation.GetDiagnostics(ct)
                 .Where(d => d.Severity == DiagnosticSeverity.Error)
+                .Select(DiagnosticKey)
+                .ToHashSet();
+            var introduced = editedCompilation.GetDiagnostics(ct)
+                .Where(d => d.Severity == DiagnosticSeverity.Error && !before.Contains(DiagnosticKey(d)))
                 .Select(d => d.ToString())
                 .ToList();
-            if (errors.Count > 0) return new GenerateResult(false, errors, null);
+            if (introduced.Count > 0) return new GenerateResult(false, introduced, null);
 
             // Commit: write each changed document to disk (LF, matching the repo convention).
             foreach (var change in solution.GetChanges(project.Solution).GetProjectChanges())
@@ -71,4 +77,9 @@ public sealed class ProjectGenerator
             return new GenerateResult(false, [ex.Message], null);
         }
     }
+
+    /// <summary>A location-independent identity for a diagnostic, so a pre-existing error still matches after edits
+    /// shift its line number.</summary>
+    private static string DiagnosticKey(Diagnostic d) =>
+        d.Id + "|" + d.Location.SourceTree?.FilePath + "|" + d.GetMessage();
 }
