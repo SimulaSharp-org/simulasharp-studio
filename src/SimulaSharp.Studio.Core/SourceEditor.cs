@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Editing;
 using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Simplification;
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
 namespace SimulaSharp.Studio.Core;
@@ -32,9 +33,16 @@ public static class SourceEditor
 
         var editor = await DocumentEditor.CreateAsync(document, ct).ConfigureAwait(false);
         editor.ReplaceNode(typeDecl, edited);
+        var changed = editor.GetChangedDocument();
+
+        // Generated type references are emitted fully qualified and Simplifier-annotated: ImportAdder adds a using
+        // where that lets a name shorten, and Simplifier reduces each to its shortest *unambiguous* form (so e.g.
+        // DemoSim.Env.Environment stays qualified rather than colliding with System.Environment).
+        changed = await ImportAdder.AddImportsAsync(changed, Simplifier.Annotation, null, ct).ConfigureAwait(false);
+        changed = await Simplifier.ReduceAsync(changed, Simplifier.Annotation, null, ct).ConfigureAwait(false);
+
         // Re-flow only the nodes we touched (they carry the formatter annotation), keeping the diff minimal.
-        var formatted = await Formatter.FormatAsync(editor.GetChangedDocument(), Formatter.Annotation, cancellationToken: ct)
-            .ConfigureAwait(false);
+        var formatted = await Formatter.FormatAsync(changed, Formatter.Annotation, cancellationToken: ct).ConfigureAwait(false);
         return formatted.Project.Solution;
     }
 
@@ -43,10 +51,15 @@ public static class SourceEditor
         "removeMember" => RemoveMember(type, a.Name ?? throw Missing("removeMember", "name")),
         "addMember" => AddMember(type, a.Member ?? throw Missing("addMember", "member")),
         "updateMember" => UpdateMember(type, a.Name ?? throw Missing("updateMember", "name"), a.Member ?? throw Missing("updateMember", "member")),
+        "addAssociation" => AddAssociation(type, a.Assoc ?? throw Missing("addAssociation", "assoc")),
+        "renameAssociation" => RenameAssociation(type, a.Ref ?? throw Missing("renameAssociation", "ref"), a.To ?? throw Missing("renameAssociation", "to")),
+        "removeAssociation" => RemoveAssociation(type, a.Ref ?? throw Missing("removeAssociation", "ref")),
         _ => throw new NotSupportedException($"Generate does not yet support '{a.Op}'."),
     };
 
     private static InvalidOperationException Missing(string op, string field) => new($"{op} needs a {field}.");
+
+    private static string SimpleName(string typeKey) { int d = typeKey.LastIndexOf('.'); return d < 0 ? typeKey : typeKey[(d + 1)..]; }
 
     // ── Remove ────────────────────────────────────────────────────────────────
 
@@ -87,10 +100,10 @@ public static class SourceEditor
         {
             string ret = string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type!;
             string body = ret == "void" ? "{ }" : "=> throw new global::System.NotImplementedException();";
-            return $"[ServiceRequest] public {ret} Handle_{dto.Name}() {body}";
+            return $"[ServiceRequest] public {ret} Handle_{dto.Name}({dto.Params}) {body}";
         }
         if (f.Contains("Method")) // interface method
-            return $"{(string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type)} {dto.Name}();";
+            return $"{(string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type)} {dto.Name}({dto.Params});";
         if (f.Contains("Property")) // interface property
             return $"{type} {dto.Name} {{ get; set; }}";
 
@@ -121,6 +134,7 @@ public static class SourceEditor
                     .WithVariables(SingletonSeparatedList(fld.Declaration.Variables[0].WithIdentifier(Identifier(dto.Name))))),
             MethodDeclarationSyntax m => m
                 .WithReturnType(TypeOr(dto.Type, m.ReturnType).WithTrailingTrivia(Space))
+                .WithParameterList(dto.Params is null ? m.ParameterList : ParseParameterList($"({dto.Params})"))
                 .WithIdentifier(Identifier(HasAttr(m.AttributeLists, "ServiceRequest") ? "Handle_" + dto.Name : dto.Name)),
             _ => throw new NotSupportedException($"Cannot update member kind '{member.Kind()}'."),
         };
@@ -212,4 +226,121 @@ public static class SourceEditor
             a.Name.ToString().Contains("ServiceEvent") &&
             a.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax lit &&
             lit.Token.ValueText == name);
+
+    // ── Associations ───────────────────────────────────────────────────────────
+
+    /// <summary>Adds an association: a <c>[Contains&lt;T&gt;]</c> / <c>[References&lt;T&gt;]</c> decorator, a
+    /// <c>[ServiceRef]</c> member, or a base-list entry. Targets are written by simple name (a using is added upstream).</summary>
+    public static TypeDeclarationSyntax AddAssociation(TypeDeclarationSyntax type, AssocDto a)
+    {
+        string fqn = "global::" + a.Target; // Simplifier shortens it to the least-qualified unambiguous form
+        return a.Kind switch
+        {
+            "Containment" => type.AddAttributeLists(Decorator("Contains", fqn, a.Name)),
+            "Reference" => type.AddAttributeLists(Decorator("References", fqn, a.Name)),
+            "ServiceDep" => type.AddMembers(ParseMemberDeclaration($"[ServiceRef] public {fqn} {a.Name} {{ get; set; }} = null!;")!
+                .WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation)),
+            "Inheritance" => (TypeDeclarationSyntax)type.AddBaseListTypes(
+                SimpleBaseType(ParseTypeName(fqn)).WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation)),
+            _ => throw new NotSupportedException($"addAssociation kind '{a.Kind}'."),
+        };
+    }
+
+    /// <summary>Renames a named association: the string argument of a Contains/References decorator, or the
+    /// <c>[ServiceRef]</c> member's identifier. (Inheritance has no name.)</summary>
+    public static TypeDeclarationSyntax RenameAssociation(TypeDeclarationSyntax type, AssocDto r, string to)
+    {
+        switch (r.Kind)
+        {
+            case "Containment":
+            case "Reference":
+                var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
+                           ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
+                var arg = attr.ArgumentList!.Arguments[0];
+                return type.ReplaceNode(arg, arg.WithExpression(Str(to)));
+            case "ServiceDep":
+                var member = FindServiceRef(type, r.Name)
+                             ?? throw new InvalidOperationException($"[ServiceRef] '{r.Name}' not found on '{type.Identifier.Text}'.");
+                return type.ReplaceNode(member, RenameMemberTo(member, to).WithAdditionalAnnotations(Formatter.Annotation));
+            default:
+                throw new NotSupportedException($"renameAssociation kind '{r.Kind}'.");
+        }
+    }
+
+    /// <summary>Removes an association: the matching decorator, the <c>[ServiceRef]</c> member, or the base-list entry.</summary>
+    public static TypeDeclarationSyntax RemoveAssociation(TypeDeclarationSyntax type, AssocDto r)
+    {
+        switch (r.Kind)
+        {
+            case "Containment":
+            case "Reference":
+                var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
+                           ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
+                // Drop the whole list if this was its only attribute, else just the one attribute.
+                var list = (AttributeListSyntax)attr.Parent!;
+                SyntaxNode drop = list.Attributes.Count == 1 ? list : attr;
+                return (TypeDeclarationSyntax)type.RemoveNode(drop, SyntaxRemoveOptions.KeepNoTrivia)!;
+            case "ServiceDep":
+                var member = FindServiceRef(type, r.Name)
+                             ?? throw new InvalidOperationException($"[ServiceRef] '{r.Name}' not found on '{type.Identifier.Text}'.");
+                return (TypeDeclarationSyntax)type.RemoveNode(member, SyntaxRemoveOptions.KeepNoTrivia)!;
+            case "Inheritance":
+                return RemoveBaseType(type, SimpleName(r.Target));
+            default:
+                throw new NotSupportedException($"removeAssociation kind '{r.Kind}'.");
+        }
+    }
+
+    private static TypeDeclarationSyntax RemoveBaseType(TypeDeclarationSyntax type, string simple)
+    {
+        var entry = type.BaseList?.Types.FirstOrDefault(t => SimpleNameOfType(t.Type) == simple)
+                    ?? throw new InvalidOperationException($"Base type '{simple}' not found on '{type.Identifier.Text}'.");
+        // Removing the sole base drops the whole ": …" clause; the formatter tidies the trailing space.
+        return type.BaseList!.Types.Count == 1
+            ? (TypeDeclarationSyntax)type.WithBaseList(null).WithAdditionalAnnotations(Formatter.Annotation)
+            : (TypeDeclarationSyntax)type.RemoveNode(entry, SyntaxRemoveOptions.KeepNoTrivia)!;
+    }
+
+    private static AttributeListSyntax Decorator(string name, string typeArg, string argName) =>
+        ParseAttributeList($"[{name}<{typeArg}>(\"{argName}\")]").WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation);
+
+    private static string DecoratorName(string kind) => kind == "Containment" ? "Contains" : "References";
+
+    private static MemberDeclarationSyntax RenameMemberTo(MemberDeclarationSyntax member, string to) => member switch
+    {
+        PropertyDeclarationSyntax p => p.WithIdentifier(Identifier(to)),
+        FieldDeclarationSyntax f => f.WithDeclaration(f.Declaration.WithVariables(
+            SingletonSeparatedList(f.Declaration.Variables[0].WithIdentifier(Identifier(to))))),
+        _ => member,
+    };
+
+    private static AttributeSyntax? FindDecorator(TypeDeclarationSyntax type, string name, string targetSimple, string argName) =>
+        type.AttributeLists.SelectMany(l => l.Attributes).FirstOrDefault(a =>
+            a.Name is GenericNameSyntax g && g.Identifier.Text == name &&
+            SimpleNameOfType(g.TypeArgumentList.Arguments.FirstOrDefault()) == targetSimple &&
+            FirstStringArg(a) == argName);
+
+    private static MemberDeclarationSyntax? FindServiceRef(TypeDeclarationSyntax type, string name) =>
+        type.Members.FirstOrDefault(m => HasAttr(m.AttributeLists, "ServiceRef") && MemberNameOf(m) == name);
+
+    private static string? MemberNameOf(MemberDeclarationSyntax m) => m switch
+    {
+        PropertyDeclarationSyntax p => p.Identifier.Text,
+        FieldDeclarationSyntax { Declaration.Variables: [{ } v] } => v.Identifier.Text,
+        _ => null,
+    };
+
+    private static string? FirstStringArg(AttributeSyntax a) =>
+        a.ArgumentList?.Arguments.FirstOrDefault()?.Expression is LiteralExpressionSyntax lit ? lit.Token.ValueText : null;
+
+    private static string? SimpleNameOfType(TypeSyntax? t) => t switch
+    {
+        IdentifierNameSyntax id => id.Identifier.Text,
+        QualifiedNameSyntax q => q.Right.Identifier.Text,
+        GenericNameSyntax g => g.Identifier.Text,
+        null => null,
+        _ => t.ToString(),
+    };
+
+    private static LiteralExpressionSyntax Str(string s) => LiteralExpression(SyntaxKind.StringLiteralExpression, Literal(s));
 }

@@ -1,7 +1,8 @@
 namespace SimulaSharp.Studio.Core;
 
-/// <summary>The value/shape of a member in an edit action (mirrors the SPA's member row).</summary>
-public sealed record MemberDto(string Name, string? Type, IReadOnlyList<string> Facets);
+/// <summary>The value/shape of a member in an edit action (mirrors the SPA's member row). <paramref name="Params"/>
+/// is the parameter list for a method-shaped member (interface method / service-request handler); null otherwise.</summary>
+public sealed record MemberDto(string Name, string? Type, IReadOnlyList<string> Facets, string? Params = null);
 
 /// <summary>An association in an edit action (mirrors the SPA's association).</summary>
 public sealed record AssocDto(string Kind, string Name, string Target);

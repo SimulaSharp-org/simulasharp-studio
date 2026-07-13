@@ -4,9 +4,11 @@ namespace SimulaSharp.Studio.Core;
 /// A designable member row on a type. <paramref name="Facets"/> are the roles the member carries — a single value
 /// member can be several at once (e.g. a knob that is <em>also</em> a plottable), listed together on one row rather
 /// than duplicated. Each facet is one of <c>Parameter</c> / <c>Knob</c> / <c>Plottable</c> / <c>ServiceRequest</c> /
-/// <c>ServiceEvent</c>. <paramref name="Type"/> is the value / payload / return type where meaningful (null otherwise).
+/// <c>ServiceEvent</c> / <c>Property</c> / <c>Method</c>. <paramref name="Type"/> is the value / payload / return type
+/// where meaningful (null otherwise). <paramref name="Params"/> is the parameter list of a method-shaped member (an
+/// interface <c>Method</c> or a <c>ServiceRequest</c> handler), e.g. <c>"int slot, double watts"</c>; null otherwise.
 /// </summary>
-public sealed record MemberRow(string Name, string? Type, IReadOnlyList<string> Facets);
+public sealed record MemberRow(string Name, string? Type, IReadOnlyList<string> Facets, string? Params = null);
 
 /// <summary>
 /// A directed association from one designable type to another. <paramref name="Kind"/> is

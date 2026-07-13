@@ -17,7 +17,7 @@ import {
 import * as signalR from '@microsoft/signalr'
 import '@xyflow/react/dist/style.css'
 
-type MemberRow = { name: string; type: string | null; facets: string[] }
+type MemberRow = { name: string; type: string | null; facets: string[]; params?: string | null }
 type Association = { kind: string; name: string; target: string }
 type DesignableType = {
   namespace: string
@@ -195,14 +195,23 @@ function MemberForm({
 }) {
   const [name, setName] = useState(initial?.name ?? '')
   const [type, setType] = useState(initial?.type ?? '')
+  const [params, setParams] = useState(initial?.params ?? '')
   const [facets, setFacets] = useState<string[]>(initial?.facets ?? [])
 
   const catalog = FACETS_BY_KIND[kind] ?? []
   const single = kind === 'Interface' // a member is a Property XOR a Method
   const addable = catalog.filter((f) => !facets.includes(f))
+  const isMethod = facets.includes('Method') || facets.includes('ServiceRequest') // takes a signature, not just a type
   const valid = name.trim().length > 0 && facets.length > 0
 
-  const commit = () => valid && onSave({ name: name.trim(), type: type.trim() || null, facets })
+  const commit = () =>
+    valid &&
+    onSave({
+      name: name.trim(),
+      type: type.trim() || null,
+      facets,
+      params: isMethod ? params.trim() || null : null,
+    })
 
   return (
     <div className="member-form" onClick={(e) => e.stopPropagation()}>
@@ -217,12 +226,21 @@ function MemberForm({
         />
         <input
           className="mf-type"
-          placeholder="type"
+          placeholder={isMethod ? 'returns' : 'type'}
           value={type}
           onChange={(e) => setType(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && commit()}
         />
       </div>
+      {isMethod && (
+        <input
+          className="mf-params"
+          placeholder="parameters, e.g. int slot, double watts"
+          value={params}
+          onChange={(e) => setParams(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && commit()}
+        />
+      )}
       <div className="mf-facets">
         {single ? (
           <select className="mf-single" value={facets[0] ?? ''} onChange={(e) => setFacets(e.target.value ? [e.target.value] : [])}>
@@ -484,6 +502,7 @@ function ClassNode({ data }: NodeProps) {
                 }}
               >
                 {m.name}
+                {(m.facets.includes('Method') || m.facets.includes('ServiceRequest')) && `(${m.params ?? ''})`}
               </span>
               {m.type && <span className="mtype">{m.type}</span>}
               <button className="mdel" title="delete member" onClick={() => onDelete(m.name)}>

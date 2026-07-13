@@ -287,6 +287,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .mf-row { display: flex; gap: 6px; }
 .mf-name { flex: 1; min-width: 0; }
 .mf-type { flex: 1; min-width: 0; }
+.mf-params { width: 100%; }
 .mf-facets { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .mf-facets .mbadge { gap: 3px; padding-right: 3px; }
 .mf-facet-del {

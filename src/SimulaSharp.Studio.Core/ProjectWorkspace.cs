@@ -81,7 +81,7 @@ public sealed class ProjectWorkspace
                         break;
                     case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
                         rows.Add(new MemberRow(method.Name,
-                            method.ReturnsVoid ? null : method.ReturnType.ToDisplayString(TypeFormat), ["Method"]));
+                            method.ReturnsVoid ? null : method.ReturnType.ToDisplayString(TypeFormat), ["Method"], ParamList(method)));
                         break;
                 }
             }
@@ -114,13 +114,19 @@ public sealed class ProjectWorkspace
                         rows.Add(new MemberRow(method.Name, "trigger", ["Knob"]));
                     if (HasAttr(method, k.ServiceRequest) && method.Name.StartsWith("Handle_", StringComparison.Ordinal))
                         rows.Add(new MemberRow(method.Name["Handle_".Length..],
-                            method.ReturnsVoid ? null : method.ReturnType.ToDisplayString(TypeFormat), ["ServiceRequest"]));
+                            method.ReturnsVoid ? null : method.ReturnType.ToDisplayString(TypeFormat), ["ServiceRequest"], ParamList(method)));
                     break;
             }
         }
 
         return rows;
     }
+
+    /// <summary>The parameter list of a method as source-like text (e.g. <c>"int slot, double watts"</c>), or null if none.</summary>
+    private static string? ParamList(IMethodSymbol method) =>
+        method.Parameters.Length == 0
+            ? null
+            : string.Join(", ", method.Parameters.Select(p => $"{p.Type.ToDisplayString(TypeFormat)} {p.Name}"));
 
     /// <summary>Emits one row for a value member, combining its Parameter / Knob / Plottable roles into facets.</summary>
     private static void AddValueMember(List<MemberRow> rows, ISymbol member, ITypeSymbol type, Symbols k)
