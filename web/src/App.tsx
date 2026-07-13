@@ -52,6 +52,7 @@ type TopoAction =
   // instance-tree edits — path is the dotted instance path (Sim.Root.Child…, containers/sites transparent)
   | { op: 'addRootModel'; asm: string; site: string; name: string; type: string }
   | { op: 'addInstance'; asm: string; parentPath: string; container: string; name: string; type: string }
+  | { op: 'moveInstance'; asm: string; path: string; toParentPath: string; toContainer: string }
   | { op: 'removeInstance'; asm: string; path: string }
   | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
 
@@ -103,6 +104,24 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
           : { ...m, containers: [...m.containers, { name: a.container, children: [child] }] }
       return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, add) })) }
     }
+    case 'moveInstance': {
+      const fromSegs = pathSegs(a.path, asm.name)
+      const parentSegs = pathSegs(a.toParentPath, asm.name)
+      const insert = (m: ModelInstance): ModelInstance =>
+        m.containers.some((c) => c.name === a.toContainer)
+          ? { ...m, containers: m.containers.map((c) => (c.name === a.toContainer ? { ...c, children: [...c.children, moved!] } : c)) }
+          : { ...m, containers: [...m.containers, { name: a.toContainer, children: [moved!] }] }
+      let moved: ModelInstance | null = null
+      return {
+        ...asm,
+        sites: asm.sites.map((s) => {
+          const found = findInstanceAt(s.models, fromSegs)
+          if (!found) return s // the instance lives in another site — leave this one untouched
+          moved = found
+          return { ...s, models: mapInstanceAt(removeInstanceAt(s.models, fromSegs), parentSegs, insert) }
+        }),
+      }
+    }
     case 'removeInstance':
       return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: removeInstanceAt(s.models, pathSegs(a.path, asm.name)) })) }
     case 'setInstanceConfig': {
@@ -128,6 +147,17 @@ const removeInstanceAt = (models: ModelInstance[], segs: string[]): ModelInstanc
     ? models.filter((m) => m.name !== segs[0])
     : models.map((m) => (m.name === segs[0] ? { ...m, containers: m.containers.map((c) => ({ ...c, children: removeInstanceAt(c.children, segs.slice(1)) })) } : m))
 
+const findInstanceAt = (models: ModelInstance[], segs: string[]): ModelInstance | null => {
+  const m = models.find((x) => x.name === segs[0])
+  if (!m) return null
+  if (segs.length === 1) return m
+  for (const c of m.containers) {
+    const r = findInstanceAt(c.children, segs.slice(1))
+    if (r) return r
+  }
+  return null
+}
+
 const randomName = () => {
   const alpha = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
   let s = ''
@@ -142,7 +172,7 @@ const applyTopo = (assemblies: AssemblyModel[], a: TopoAction): AssemblyModel[] 
 const TOPO_OPS = new Set([
   'renameSimulator', 'addSite', 'removeSite', 'renameSite', 'setSiteMaxEvents',
   'addService', 'removeService', 'renameService', 'setServiceConfig',
-  'addRootModel', 'addInstance', 'removeInstance', 'setInstanceConfig',
+  'addRootModel', 'addInstance', 'moveInstance', 'removeInstance', 'setInstanceConfig',
 ])
 type JournalEvent = Entry | TopoAction
 const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
@@ -1032,14 +1062,37 @@ type SiteCtx = {
   allModels: { fqn: string; label: string }[]
   onAddRootModel: (asm: string, site: string, name: string, type: string) => void
   onAddInstance: (asm: string, parentPath: string, container: string, name: string, type: string) => void
+  onMoveInstance: (asm: string, path: string, toParentPath: string, toContainer: string) => void
   onRemoveInstance: (asm: string, path: string) => void
   onSetInstanceConfig: (asm: string, path: string, key: string, value: string) => void
+}
+
+type MoveTarget = { toParentPath: string; toContainer: string; label: string }
+
+// Every container across the site forest into which the focused instance may be moved: element type accepts the
+// instance's type, the container is neither its current home nor inside its own subtree (which would orphan it).
+function moveTargetsFor(asmName: string, site: SiteInstance, focusPath: string, focusType: string, ctx: SiteCtx): MoveTarget[] {
+  const out: MoveTarget[] = []
+  const focusName = focusPath.slice(focusPath.lastIndexOf('.') + 1)
+  const walk = (inst: ModelInstance, path: string) => {
+    const inFocusSubtree = path === focusPath || path.startsWith(focusPath + '.')
+    if (!inFocusSubtree)
+      for (const tc of ctx.containersOf(inst.type)) {
+        if (!ctx.candidatesOf(tc.elementType).some((c) => c.fqn === focusType)) continue
+        const holdsFocus = path + '.' + focusName === focusPath && !!inst.containers.find((c) => c.name === tc.name)?.children.some((ch) => ch.name === focusName)
+        if (holdsFocus) continue // already here
+        out.push({ toParentPath: path, toContainer: tc.name, label: `${path.slice(asmName.length + 1)} ▸ ${tc.name}` })
+      }
+    for (const c of inst.containers) for (const ch of c.children) walk(ch, path + '.' + ch.name)
+  }
+  for (const m of site.models) walk(m, asmName + '.' + m.name)
+  return out
 }
 
 // A model instance in the site canvas. Unfocused it is compact; focused ("Model view") it enlarges and shows its
 // editable Config. Removable instances (a root, or a focused node's child) carry a round delete.
 function TopoInstanceNode({ data }: NodeProps) {
-  const d = data as { inst: ModelInstance; focused: boolean; path: string; params: string[]; removable: boolean; ctx: SiteCtx }
+  const d = data as { inst: ModelInstance; focused: boolean; path: string; params: string[]; removable: boolean; moveTargets: MoveTarget[]; ctx: SiteCtx }
   const inst = d.inst
   return (
     <div className={'topo-fnode inst' + (d.focused ? ' focused' : '')}>
@@ -1060,6 +1113,26 @@ function TopoInstanceNode({ data }: NodeProps) {
               <EditableText className="topo-param-v" value={inst.config[k] ?? ''} placeholder="default" onCommit={(v) => d.ctx.onSetInstanceConfig(d.ctx.asmPath, d.path, k, v)} />
             </div>
           ))}
+        </div>
+      )}
+      {d.focused && d.moveTargets.length > 0 && (
+        <div className="topo-move" onClick={(e) => e.stopPropagation()}>
+          <select
+            className="topo-move-select"
+            value=""
+            title="move this instance into another container"
+            onChange={(e) => {
+              const t = d.moveTargets[Number(e.target.value)]
+              if (t) d.ctx.onMoveInstance(d.ctx.asmPath, d.path, t.toParentPath, t.toContainer)
+            }}
+          >
+            <option value="">move to…</option>
+            {d.moveTargets.map((t, i) => (
+              <option key={t.label} value={i}>
+                {t.label}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>
@@ -1171,7 +1244,15 @@ function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | 
       id,
       type: 'inst',
       position: { x, y: depth * Y },
-      data: { inst, focused, path, params: ctx.paramsOf(inst.type), removable, ctx } as unknown as Record<string, unknown>,
+      data: {
+        inst,
+        focused,
+        path,
+        params: ctx.paramsOf(inst.type),
+        removable,
+        moveTargets: focused ? moveTargetsFor(asm.name, site, path, inst.type, ctx) : [],
+        ctx,
+      } as unknown as Record<string, unknown>,
     })
     return { id, x }
   }
@@ -1600,7 +1681,16 @@ export default function App() {
     dispatch({ op: 'addRootModel', asm, site, name, type })
   const onAddInstance = (asm: string, parentPath: string, container: string, name: string, type: string) =>
     dispatch({ op: 'addInstance', asm, parentPath, container, name, type })
-  const onRemoveInstance = (asm: string, path: string) => dispatch({ op: 'removeInstance', asm, path })
+  const onMoveInstance = (asm: string, path: string, toParentPath: string, toContainer: string) =>
+    dispatch({ op: 'moveInstance', asm, path, toParentPath, toContainer })
+  // Deleting a non-empty instance drops its whole subtree — confirm first so a populated container isn't lost by a stray click.
+  const onRemoveInstance = (asm: string, path: string) => {
+    const a = workingAssemblies?.find((x) => x.path === asm)
+    const inst = a && findInstanceAt(a.sites.flatMap((s) => s.models), pathSegs(path, a.name))
+    const kids = inst ? inst.containers.reduce((n, c) => n + c.children.length, 0) : 0
+    if (kids > 0 && !window.confirm(`Delete "${inst!.name}" and its ${kids} contained instance${kids === 1 ? '' : 's'}?`)) return
+    dispatch({ op: 'removeInstance', asm, path })
+  }
   const onSetInstanceConfig = (asm: string, path: string, key: string, value: string) =>
     dispatch({ op: 'setInstanceConfig', asm, path, key, value })
 
@@ -1933,7 +2023,7 @@ export default function App() {
                 site={drilledSite.site}
                 rev={rev}
                 onBack={() => setOpenSite(null)}
-                ctx={{ asmPath: drilledSite.asm.path, paramsOf, containersOf, candidatesOf, allModels, onAddRootModel, onAddInstance, onRemoveInstance, onSetInstanceConfig }}
+                ctx={{ asmPath: drilledSite.asm.path, paramsOf, containersOf, candidatesOf, allModels, onAddRootModel, onAddInstance, onMoveInstance, onRemoveInstance, onSetInstanceConfig }}
               />
             </main>
           ) : (

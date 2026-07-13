@@ -201,6 +201,19 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .topo-fnode .topo-del.round { top: 6px; right: 6px; width: 18px; height: 18px; font-size: 12px; }
 .topo-fnode:hover .topo-del.round, .topo-fnode.focused .topo-del.round { opacity: 1; }
 .topo-fnode .topo-params { padding: 0 10px 8px; }
+.topo-fnode .topo-move { padding: 0 10px 9px; }
+.topo-move-select {
+  width: 100%;
+  font: inherit;
+  font-size: 11px;
+  color: #cbd5e1;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.topo-move-select:hover { border-color: #2563eb; }
 .topo-fnode .topo-param { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .topo-fnode .topo-param-k { opacity: 0.7; }
 .topo-fnode .topo-param-v { flex: 1; color: #cbd5e1; cursor: text; border-radius: 3px; padding: 0 2px; }
