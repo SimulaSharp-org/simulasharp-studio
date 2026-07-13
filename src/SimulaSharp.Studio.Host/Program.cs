@@ -81,4 +81,7 @@ internal sealed class StudioHub : Hub
 
     /// <summary>Opens an existing project and returns its designable-type IR for the SPA to render.</summary>
     public Task<ProjectModel> OpenProject(string path) => new ProjectWorkspace().OpenAsync(path);
+
+    /// <summary>Replays the SPA's pending edit journal back into the project's source; returns the re-derived IR.</summary>
+    public Task<GenerateResult> Generate(string path, EditAction[] actions) => new ProjectGenerator().ApplyAsync(path, actions);
 }

@@ -30,6 +30,13 @@ public sealed class ProjectWorkspace
         var compilation = await project.GetCompilationAsync(ct).ConfigureAwait(false)
                           ?? throw new InvalidOperationException($"Could not compile project '{projectPath}'.");
 
+        return BuildModel(project.Name, projectPath, compilation);
+    }
+
+    /// <summary>Projects the designable-type IR from an (already-built) compilation — the shared read path
+    /// used both to open a project and to re-derive the IR after a <see cref="ProjectGenerator"/> write-back.</summary>
+    public static ProjectModel BuildModel(string name, string path, Compilation compilation)
+    {
         var k = new Symbols(compilation);
 
         var types = new List<DesignableType>();
@@ -41,7 +48,7 @@ public sealed class ProjectWorkspace
             types.Add(new DesignableType(ns, t.Name, Classify(t, k), ProjectMembers(t, k), ProjectAssociations(t, k)));
         }
 
-        return new ProjectModel(project.Name, projectPath, types);
+        return new ProjectModel(name, path, types);
     }
 
     // ── Classification ──────────────────────────────────────────────────────────

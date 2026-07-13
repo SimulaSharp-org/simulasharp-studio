@@ -667,6 +667,7 @@ export default function App() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [genMsg, setGenMsg] = useState('')
 
   const working = useMemo(() => (baseline ? journal.reduce(applyAction, baseline) : null), [baseline, journal])
   const selected = useMemo(
@@ -699,6 +700,7 @@ export default function App() {
     setJournal((j) => [...j, a])
     setRedo([])
     setRev((r) => r + 1)
+    setGenMsg('')
   }
   const undo = () => {
     if (!journal.length) return
@@ -716,6 +718,35 @@ export default function App() {
     setJournal([])
     setRedo([])
     setRev((r) => r + 1)
+  }
+
+  // Generate: replay the pending journal into source. On success the backend returns the freshly
+  // re-derived IR, which becomes the new baseline (clearing the journal); on failure it writes nothing
+  // and returns the blocking errors.
+  const generate = async () => {
+    if (!conn.current || !baseline || !journal.length) return
+    setGenMsg('Generating…')
+    setError('')
+    try {
+      const res = await conn.current.invoke<{ ok: boolean; errors: string[]; model: ProjectModel | null }>(
+        'Generate',
+        baseline.path,
+        journal,
+      )
+      if (res.ok && res.model) {
+        setBaseline(res.model)
+        setJournal([])
+        setRedo([])
+        setRev((r) => r + 1)
+        setGenMsg('Generated ✓')
+      } else {
+        setGenMsg('Generate failed')
+        setError(res.errors.join('\n') || 'unknown error')
+      }
+    } catch (e) {
+      setGenMsg('')
+      setError(String(e))
+    }
   }
 
   const onAdd = (member: MemberRow) => {
@@ -819,6 +850,10 @@ export default function App() {
             <button onClick={discard} disabled={!journal.length} title="Discard all pending changes">
               Discard
             </button>
+            <button className="gen" onClick={generate} disabled={!journal.length} title="Write pending changes back to source">
+              Generate
+            </button>
+            {genMsg && <span className="gen-msg">{genMsg}</span>}
           </span>
         )}
       </header>

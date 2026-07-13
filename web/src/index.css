@@ -30,6 +30,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 }
 .topbar .edits button:hover:not(:disabled) { background: #1e293b; }
 .topbar .edits button:disabled { opacity: 0.4; cursor: default; }
+.topbar .edits button.gen { border-color: #2563eb; background: #1d4ed8; color: #fff; }
+.topbar .edits button.gen:hover:not(:disabled) { background: #1e40af; }
+.topbar .gen-msg { font-size: 12px; color: #86efac; }
 
 .body { flex: 1; min-height: 0; display: flex; }
 
