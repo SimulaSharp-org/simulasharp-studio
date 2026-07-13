@@ -163,6 +163,31 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
 .topo-dim { opacity: 0.5; font-weight: 400; font-size: 13px; }
 .topo-canvas { flex: 1; min-height: 0; }
 
+/* add a root model (site head) */
+.topo-add-root {
+  margin-left: auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border: 1px solid #14532d;
+  border-radius: 5px;
+  background: #14532d;
+  color: #86efac;
+  cursor: pointer;
+}
+.topo-add-root:hover { background: #166534; }
+.topo-add-root-form { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.topo-add-root-form input, .topo-add-root-form select {
+  font: inherit;
+  font-size: 12px;
+  color: #fff;
+  background: #0b1020;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+.topo-add-root-form button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+
 /* diagram nodes */
 .topo-fnode {
   position: relative;

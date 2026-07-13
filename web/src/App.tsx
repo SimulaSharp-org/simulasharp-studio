@@ -50,6 +50,7 @@ type TopoAction =
   | { op: 'renameService'; asm: string; from: string; to: string }
   | { op: 'setServiceConfig'; asm: string; name: string; key: string; value: string }
   // instance-tree edits — path is the dotted instance path (Sim.Root.Child…, containers/sites transparent)
+  | { op: 'addRootModel'; asm: string; site: string; name: string; type: string }
   | { op: 'addInstance'; asm: string; parentPath: string; container: string; name: string; type: string }
   | { op: 'removeInstance'; asm: string; path: string }
   | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
@@ -89,6 +90,10 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
       }
     case 'setServiceConfig':
       return { ...asm, services: asm.services.map((s) => (s.name === a.name ? { ...s, config: { ...s.config, [a.key]: a.value } } : s)) }
+    case 'addRootModel': {
+      const root: ModelInstance = { name: a.name, type: a.type, config: {}, containers: [], refs: [], deps: [] }
+      return { ...asm, sites: asm.sites.map((s) => (s.name === a.site ? { ...s, models: [...s.models, root] } : s)) }
+    }
     case 'addInstance': {
       const segs = pathSegs(a.parentPath, asm.name)
       const child: ModelInstance = { name: a.name, type: a.type, config: {}, containers: [], refs: [], deps: [] }
@@ -137,7 +142,7 @@ const applyTopo = (assemblies: AssemblyModel[], a: TopoAction): AssemblyModel[] 
 const TOPO_OPS = new Set([
   'renameSimulator', 'addSite', 'removeSite', 'renameSite', 'setSiteMaxEvents',
   'addService', 'removeService', 'renameService', 'setServiceConfig',
-  'addInstance', 'removeInstance', 'setInstanceConfig',
+  'addRootModel', 'addInstance', 'removeInstance', 'setInstanceConfig',
 ])
 type JournalEvent = Entry | TopoAction
 const isTopo = (e: JournalEvent): e is TopoAction => TOPO_OPS.has(e.op)
@@ -1024,6 +1029,8 @@ type SiteCtx = {
   paramsOf: (t: string) => string[]
   containersOf: (t: string) => { name: string; elementType: string }[]
   candidatesOf: (t: string) => { fqn: string; label: string }[]
+  allModels: { fqn: string; label: string }[]
+  onAddRootModel: (asm: string, site: string, name: string, type: string) => void
   onAddInstance: (asm: string, parentPath: string, container: string, name: string, type: string) => void
   onRemoveInstance: (asm: string, path: string) => void
   onSetInstanceConfig: (asm: string, path: string, key: string, value: string) => void
@@ -1173,6 +1180,50 @@ function buildSiteGraph(asm: AssemblyModel, site: SiteInstance, focus: string | 
   return { nodes, edges }
 }
 
+// Add a root model directly to a SimSite (a site's top-level instances have no container — any project model may be a
+// root). A "+ model" toggle in the site head opens a name field and a type dropdown of every model type.
+function AddRootModel({ ctx, site }: { ctx: SiteCtx; site: string }) {
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const [type, setType] = useState('')
+  const valid = name.trim().length > 0 && type.length > 0
+  const create = () => {
+    if (!valid) return
+    ctx.onAddRootModel(ctx.asmPath, site, name.trim(), type)
+    setAdding(false)
+    setName('')
+    setType('')
+  }
+  if (!adding)
+    return (
+      <button
+        className="topo-add-root"
+        title="add a root model to this site"
+        onClick={() => {
+          setType(ctx.allModels.length === 1 ? ctx.allModels[0].fqn : '')
+          setAdding(true)
+        }}
+      >
+        + model
+      </button>
+    )
+  return (
+    <span className="topo-add-root-form">
+      <input autoFocus placeholder="name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && create()} />
+      <select value={type} onChange={(e) => setType(e.target.value)}>
+        <option value="">type…</option>
+        {ctx.allModels.map((c) => (
+          <option key={c.fqn} value={c.fqn}>
+            {c.label}
+          </option>
+        ))}
+      </select>
+      <button className="mf-save" disabled={!valid} onClick={create}>add</button>
+      <button className="mf-cancel" onClick={() => setAdding(false)}>cancel</button>
+    </span>
+  )
+}
+
 function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: SiteInstance; ctx: SiteCtx; rev: number; onBack: () => void }) {
   const [focus, setFocus] = useState<string | null>(null)
   const { nodes, edges } = buildSiteGraph(asm, site, focus, ctx)
@@ -1201,6 +1252,7 @@ function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: S
         <span className="topo-dim">
           · max {site.maxEvents} events{focus ? ` · ${focus.slice(asm.name.length + 1)}` : ''}
         </span>
+        {!focus && <AddRootModel ctx={ctx} site={site.name} />}
       </div>
       <div className="topo-canvas">
         <ReactFlow
@@ -1539,6 +1591,13 @@ export default function App() {
       .filter((t) => key(t) === elementType || t.associations.some((a) => a.kind === 'Inheritance' && a.target === elementType))
       .map((t) => ({ fqn: key(t), label: `${t.name} (${t.namespace})` }))
 
+  // Every project model type, for the add-root-model dropdown (a root may be any model, unconstrained by a container).
+  const allModels = useMemo(
+    () => modelTypes.map((t) => ({ fqn: key(t), label: `${t.name} (${t.namespace})` })).sort((a, b) => a.label.localeCompare(b.label)),
+    [modelTypes],
+  )
+  const onAddRootModel = (asm: string, site: string, name: string, type: string) =>
+    dispatch({ op: 'addRootModel', asm, site, name, type })
   const onAddInstance = (asm: string, parentPath: string, container: string, name: string, type: string) =>
     dispatch({ op: 'addInstance', asm, parentPath, container, name, type })
   const onRemoveInstance = (asm: string, path: string) => dispatch({ op: 'removeInstance', asm, path })
@@ -1874,7 +1933,7 @@ export default function App() {
                 site={drilledSite.site}
                 rev={rev}
                 onBack={() => setOpenSite(null)}
-                ctx={{ asmPath: drilledSite.asm.path, paramsOf, containersOf, candidatesOf, onAddInstance, onRemoveInstance, onSetInstanceConfig }}
+                ctx={{ asmPath: drilledSite.asm.path, paramsOf, containersOf, candidatesOf, allModels, onAddRootModel, onAddInstance, onRemoveInstance, onSetInstanceConfig }}
               />
             </main>
           ) : (
