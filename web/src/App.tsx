@@ -95,6 +95,7 @@ type Action =
   | { op: 'addType'; typeKey: string; kind: string }
   | { op: 'renameType'; typeKey: string; to: string }
   | { op: 'removeType'; typeKey: string }
+  | { op: 'renameNamespace'; typeKey: string; to: string } // typeKey = old namespace, to = new namespace
 type ActionList = { op: 'bundle'; label: string; actions: Action[] }
 type Entry = Action | ActionList
 
@@ -141,6 +142,23 @@ function applyAction(model: ProjectModel, a: Action): ProjectModel {
         }),
       }
     }
+    case 'renameNamespace': {
+      const oldNs = a.typeKey
+      const newNs = a.to
+      const rewriteNs = (ns: string) => (ns === oldNs ? newNs : ns.startsWith(oldNs + '.') ? newNs + ns.slice(oldNs.length) : ns)
+      const rewriteKey = (k: string) => {
+        const ns = rewriteNs(nsOf(k))
+        return ns ? ns + '.' + nameOf(k) : nameOf(k)
+      }
+      return {
+        ...model,
+        types: model.types.map((t) => ({
+          ...t,
+          namespace: rewriteNs(t.namespace),
+          associations: t.associations.map((x) => ({ ...x, target: rewriteKey(x.target) })),
+        })),
+      }
+    }
     default:
       return { ...model, types: model.types.map((t) => (key(t) === a.typeKey ? applyToType(t, a) : t)) }
   }
@@ -179,23 +197,41 @@ type TreeProps = {
   renamingKey: string | null
   onRenameType: (typeKey: string, to: string) => void
   onRenameCancel: () => void
+  renamingNs: string | null
+  onRenameNamespace: (oldNs: string, leaf: string) => void
+  onRenameNsCancel: () => void
 }
 
 function NsFolder({ node, depth, ns, ...p }: { node: NsNode; depth: number; ns: string } & TreeProps) {
   const [open, setOpen] = useState(false)
   const folders = [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name))
   const types = [...node.types].sort(byKindThenName)
+  const renaming = ns === p.renamingNs
   return (
     <div>
       <div
         className="row folder"
         style={{ paddingLeft: depth * 14 + 6 }}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => !renaming && setOpen((o) => !o)}
         onContextMenu={(e) => p.onContext(e, 'ns', ns)}
       >
         <span className="chev">{open ? '▾' : '▸'}</span>
         <span className="folder-badge">N</span>
-        <span className="row-label">{node.name}</span>
+        {renaming ? (
+          <input
+            className="rename-input"
+            autoFocus
+            defaultValue={node.name}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={p.onRenameNsCancel}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') p.onRenameNamespace(ns, (e.target as HTMLInputElement).value)
+              else if (e.key === 'Escape') p.onRenameNsCancel()
+            }}
+          />
+        ) : (
+          <span className="row-label">{node.name}</span>
+        )}
       </div>
       {open && (
         <>
@@ -799,6 +835,7 @@ export default function App() {
   const [genMsg, setGenMsg] = useState('')
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'type' | 'ns'; target: string } | null>(null)
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
+  const [renamingNs, setRenamingNs] = useState<string | null>(null) // full namespace being leaf-renamed
   const [newTypeNs, setNewTypeNs] = useState<string | null>(null) // stable prefix for the New Type dialog
 
   const working = useMemo(() => (baseline ? journal.reduce(applyEntry, baseline) : null), [baseline, journal])
@@ -936,6 +973,23 @@ export default function App() {
     if (selectedKey === typeKey) setSelectedKey(null)
   }
 
+  const onRenameNamespace = (oldNs: string, leafRaw: string) => {
+    setRenamingNs(null)
+    const leaf = leafRaw.trim()
+    const oldLeaf = oldNs.includes('.') ? oldNs.slice(oldNs.lastIndexOf('.') + 1) : oldNs
+    if (!leaf || leaf === oldLeaf || leaf.includes('.')) return
+    const parent = oldNs.includes('.') ? oldNs.slice(0, oldNs.lastIndexOf('.')) : ''
+    const newNs = parent ? parent + '.' + leaf : leaf
+    if (working?.types.some((t) => t.namespace === newNs || t.namespace.startsWith(newNs + '.'))) return // would merge into an existing namespace
+    dispatch({ op: 'renameNamespace', typeKey: oldNs, to: newNs })
+    if (selectedKey) {
+      const sns = nsOf(selectedKey)
+      if (sns === oldNs || sns.startsWith(oldNs + '.'))
+        setSelectedKey((sns === oldNs ? newNs : newNs + sns.slice(oldNs.length)) + '.' + nameOf(selectedKey))
+    }
+  }
+  const onRenameNsCancel = () => setRenamingNs(null)
+
   const onDeleteNamespace = (ns: string) => {
     const victims = (working?.types ?? []).filter((t) => t.namespace === ns || t.namespace.startsWith(ns + '.'))
     if (!victims.length) return
@@ -1064,6 +1118,9 @@ export default function App() {
                     renamingKey={renamingKey}
                     onRenameType={onRenameType}
                     onRenameCancel={onRenameCancel}
+                    renamingNs={renamingNs}
+                    onRenameNamespace={onRenameNamespace}
+                    onRenameNsCancel={onRenameNsCancel}
                   />
                 ))}
               {[...root.types].sort(byKindThenName).map((t) => (
@@ -1077,6 +1134,9 @@ export default function App() {
                   renamingKey={renamingKey}
                   onRenameType={onRenameType}
                   onRenameCancel={onRenameCancel}
+                  renamingNs={renamingNs}
+                  onRenameNamespace={onRenameNamespace}
+                  onRenameNsCancel={onRenameNsCancel}
                 />
               ))}
             </div>
@@ -1118,6 +1178,7 @@ export default function App() {
               </>
             ) : (
               <>
+                <button onClick={() => { setRenamingNs(menu.target); setMenu(null) }}>Rename</button>
                 <button onClick={() => { setNewTypeNs(menu.target); setMenu(null) }}>New type…</button>
                 <button className="danger" onClick={() => { onDeleteNamespace(menu.target); setMenu(null) }}>Delete namespace…</button>
               </>

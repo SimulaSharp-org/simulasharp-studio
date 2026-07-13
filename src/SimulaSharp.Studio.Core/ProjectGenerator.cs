@@ -48,6 +48,7 @@ public sealed class ProjectGenerator
                     "addType" => AddType(solution, projectId, a),
                     "renameType" => await RenameType(solution, projectId, a, ct).ConfigureAwait(false),
                     "removeType" => await RemoveType(solution, projectId, a, ct).ConfigureAwait(false),
+                    "renameNamespace" => await RenameNamespace(solution, projectId, a, ct).ConfigureAwait(false),
                     _ => await ApplyToTypeBody(solution, projectId, a, ct).ConfigureAwait(false),
                 };
 
@@ -123,6 +124,31 @@ public sealed class ProjectGenerator
 
         var newRoot = root.RemoveNode(decl, SyntaxRemoveOptions.KeepNoTrivia)!;
         return solution.WithDocumentSyntaxRoot(document.Id, newRoot);
+    }
+
+    /// <summary>Renames a namespace by its leaf segment — <see cref="Renamer"/> on the namespace symbol repoints every
+    /// declaration and reference (usings, qualified names) across the solution in one clean pass. The frontend only ever
+    /// changes the leaf, so the parent path is unchanged.</summary>
+    private static async Task<Solution> RenameNamespace(Solution solution, ProjectId projectId, EditAction a, CancellationToken ct)
+    {
+        var compilation = await solution.GetProject(projectId)!.GetCompilationAsync(ct).ConfigureAwait(false)
+                          ?? throw new InvalidOperationException("Could not recompile the project.");
+        var ns = FindNamespace(compilation.GlobalNamespace, a.TypeKey)
+                 ?? throw new InvalidOperationException($"Namespace '{a.TypeKey}' not found in the project.");
+        string newNs = a.To ?? throw new InvalidOperationException("renameNamespace needs a new namespace.");
+        string newLeaf = newNs.Contains('.') ? newNs[(newNs.LastIndexOf('.') + 1)..] : newNs;
+        return await Renamer.RenameSymbolAsync(solution, ns, new SymbolRenameOptions(), newLeaf, ct).ConfigureAwait(false);
+    }
+
+    private static INamespaceSymbol? FindNamespace(INamespaceSymbol root, string ns)
+    {
+        INamespaceSymbol? current = root;
+        foreach (var seg in ns.Split('.'))
+        {
+            current = current.GetNamespaceMembers().FirstOrDefault(n => n.Name == seg);
+            if (current is null) return null;
+        }
+        return current;
     }
 
     private static async Task<INamedTypeSymbol> ResolveType(Solution solution, ProjectId projectId, string typeKey, CancellationToken ct)
