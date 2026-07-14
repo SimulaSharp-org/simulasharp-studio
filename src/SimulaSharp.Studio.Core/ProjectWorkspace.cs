@@ -155,13 +155,15 @@ public sealed class ProjectWorkspace
         foreach (var i in t.Interfaces)
             edges.Add(new Association("Inheritance", "", TypeKey(i)));
 
-        // Containment / references: generic class decorators [Contains<T>("Name")] / [References<T>("Name")].
+        // Containment / references: generic class decorators [Contains<T>], [Reference<T>] (intra-site) and
+        // [CrossReference<T>] (cross-site), each named [<Name>].
         foreach (var attr in t.GetAttributes())
         {
             var def = attr.AttributeClass?.OriginalDefinition;
             string? kind =
                 Eq(def, k.Contains) ? "Containment" :
-                Eq(def, k.References) ? "Reference" : null;
+                Eq(def, k.Reference) ? "Reference" :
+                Eq(def, k.CrossReference) ? "CrossReference" : null;
             if (kind is null || attr.AttributeClass!.TypeArguments.Length < 1) continue;
             string name = attr.ConstructorArguments.Length >= 1 ? attr.ConstructorArguments[0].Value as string ?? "" : "";
             edges.Add(new Association(kind, name, TypeKey(attr.AttributeClass.TypeArguments[0])));
@@ -238,6 +240,7 @@ public sealed class ProjectWorkspace
         public readonly INamedTypeSymbol? ServiceEvent = c.GetTypeByMetadataName(Ns + "Attributes.ServiceEventAttribute");
         public readonly INamedTypeSymbol? ServiceRef = c.GetTypeByMetadataName(Ns + "Attributes.ServiceRefAttribute");
         public readonly INamedTypeSymbol? Contains = c.GetTypeByMetadataName(Ns + "Attributes.ContainsAttribute`1");
-        public readonly INamedTypeSymbol? References = c.GetTypeByMetadataName(Ns + "Attributes.ReferencesAttribute`1");
+        public readonly INamedTypeSymbol? Reference = c.GetTypeByMetadataName(Ns + "Attributes.ReferenceAttribute`1");
+        public readonly INamedTypeSymbol? CrossReference = c.GetTypeByMetadataName(Ns + "Attributes.CrossReferenceAttribute`1");
     }
 }

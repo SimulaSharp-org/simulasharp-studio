@@ -23,7 +23,17 @@ public sealed class AssemblyReaderTests
             Assert.That(batteries.Children.Select(m => m.Name), Is.EquivalentTo(new[] { "Bat1", "Bat2" }));
             Assert.That(batteries.Children.Single(m => m.Name == "Bat1").Config["CapacityWh"], Is.EqualTo("2000"));
 
-            Assert.That(eps.Refs.Single(r => r.Name == "Consumers").Targets, Does.Contain("DemoSim.Heater"));
+            // The intra-site Reference (Refs: block) parses with IsCross=false; the cross-site CrossReference
+            // (CRefs: block) with IsCross=true — both merge into the one Refs list.
+            var cells = eps.Refs.Single(r => r.Name == "Cells");
+            Assert.That(cells.IsCross, Is.False, "Cells is an intra-site Reference");
+            Assert.That(cells.Targets, Is.EquivalentTo(new[] { "DemoSim.Eps.Bat1", "DemoSim.Eps.Bat2" }));
+
+            var consumers = eps.Refs.Single(r => r.Name == "Consumers");
+            Assert.That(consumers.IsCross, Is.True, "Consumers is a cross-site CrossReference");
+            Assert.That(consumers.Targets, Does.Contain("DemoSim.Heater"));
+
+            Assert.That(a.Sites.Single(s => s.Name == "Loads").Models.Any(m => m.Name == "Heater"), "Heater on Loads site");
             Assert.That(eps.Deps.Any(d => d is { Member: "Environment", Service: "Environment" }), "Eps → Environment dep");
         });
     }

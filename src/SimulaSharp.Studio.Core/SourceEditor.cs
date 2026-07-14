@@ -229,15 +229,17 @@ public static class SourceEditor
 
     // ── Associations ───────────────────────────────────────────────────────────
 
-    /// <summary>Adds an association: a <c>[Contains&lt;T&gt;]</c> / <c>[References&lt;T&gt;]</c> decorator, a
-    /// <c>[ServiceRef]</c> member, or a base-list entry. Targets are written by simple name (a using is added upstream).</summary>
+    /// <summary>Adds an association: a <c>[Contains&lt;T&gt;]</c> / <c>[Reference&lt;T&gt;]</c> /
+    /// <c>[CrossReference&lt;T&gt;]</c> decorator, a <c>[ServiceRef]</c> member, or a base-list entry. Targets are written
+    /// by simple name (a using is added upstream).</summary>
     public static TypeDeclarationSyntax AddAssociation(TypeDeclarationSyntax type, AssocDto a)
     {
         string fqn = "global::" + a.Target; // Simplifier shortens it to the least-qualified unambiguous form
         return a.Kind switch
         {
             "Containment" => type.AddAttributeLists(Decorator("Contains", fqn, a.Name)),
-            "Reference" => type.AddAttributeLists(Decorator("References", fqn, a.Name)),
+            "Reference" => type.AddAttributeLists(Decorator("Reference", fqn, a.Name)),
+            "CrossReference" => type.AddAttributeLists(Decorator("CrossReference", fqn, a.Name)),
             "ServiceDep" => type.AddMembers(ParseMemberDeclaration($"[ServiceRef] public {fqn} {a.Name} {{ get; set; }} = null!;")!
                 .WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation)),
             "Inheritance" => (TypeDeclarationSyntax)type.AddBaseListTypes(
@@ -254,6 +256,7 @@ public static class SourceEditor
         {
             case "Containment":
             case "Reference":
+            case "CrossReference":
                 var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
                            ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
                 var arg = attr.ArgumentList!.Arguments[0];
@@ -274,6 +277,7 @@ public static class SourceEditor
         {
             case "Containment":
             case "Reference":
+            case "CrossReference":
                 var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
                            ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
                 // Drop the whole list if this was its only attribute, else just the one attribute.
@@ -304,7 +308,12 @@ public static class SourceEditor
     private static AttributeListSyntax Decorator(string name, string typeArg, string argName) =>
         ParseAttributeList($"[{name}<{typeArg}>(\"{argName}\")]").WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation);
 
-    private static string DecoratorName(string kind) => kind == "Containment" ? "Contains" : "References";
+    private static string DecoratorName(string kind) => kind switch
+    {
+        "Containment" => "Contains",
+        "CrossReference" => "CrossReference",
+        _ => "Reference",   // intra-site [Reference<T>]
+    };
 
     private static MemberDeclarationSyntax RenameMemberTo(MemberDeclarationSyntax member, string to) => member switch
     {

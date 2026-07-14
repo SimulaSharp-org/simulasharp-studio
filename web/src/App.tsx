@@ -30,7 +30,9 @@ type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
 // ── Assembly topology (read-only for now) ───────────────────────────────────────
 type DepBinding = { member: string; service: string }
-type ReferenceBinding = { name: string; targets: string[] }
+// isCross tags the binding's kind so write-back files it under the right YAML block: false → intra-site [Reference<T>]
+// (Refs:), true → cross-site [CrossReference<T>] (CRefs:). Defaults to false when omitted (legacy single-kind actions).
+type ReferenceBinding = { name: string; targets: string[]; isCross?: boolean }
 type Container = { name: string; children: ModelInstance[] }
 type ModelInstance = { name: string; type: string; config: Record<string, string>; containers: Container[]; refs: ReferenceBinding[]; deps: DepBinding[] }
 type ServiceInstance = { name: string; type: string; config: Record<string, string>; deps: DepBinding[] }
@@ -55,8 +57,9 @@ type TopoAction =
   | { op: 'moveInstance'; asm: string; path: string; toParentPath: string; toContainer: string }
   | { op: 'removeInstance'; asm: string; path: string }
   | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
-  // reference/dep wiring — `name`/`member` name a [References<T>]/[ServiceRef] field on the instance's type
-  | { op: 'setReference'; asm: string; path: string; name: string; targets: string[] }
+  // reference/dep wiring — `name`/`member` name a [Reference<T>]/[CrossReference<T>]/[ServiceRef] field on the
+  // instance's type. `isCross` files the binding under Refs: (false) vs CRefs: (true).
+  | { op: 'setReference'; asm: string; path: string; name: string; targets: string[]; isCross: boolean }
   | { op: 'setServiceDep'; asm: string; path: string; member: string; service: string }
 
 const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
@@ -138,8 +141,8 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
         const refs = !a.targets.length
           ? m.refs.filter((r) => r.name !== a.name)
           : m.refs.some((r) => r.name === a.name)
-            ? m.refs.map((r) => (r.name === a.name ? { ...r, targets: a.targets } : r))
-            : [...m.refs, { name: a.name, targets: a.targets }]
+            ? m.refs.map((r) => (r.name === a.name ? { ...r, targets: a.targets, isCross: a.isCross } : r))
+            : [...m.refs, { name: a.name, targets: a.targets, isCross: a.isCross }]
         return { ...m, refs }
       }
       return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
@@ -272,9 +275,11 @@ const key = (t: DesignableType) => (t.namespace ? t.namespace + '.' + t.name : t
 // Association layout: each kind sits on one side of the selected type, and each edge is coloured by kind.
 const SIDES = ['top', 'right', 'bottom', 'left'] as const
 type Side = (typeof SIDES)[number]
+// Both reference kinds — intra-site Reference and cross-site CrossReference — live on the right side.
 const SIDE_OF: Record<string, Side> = {
   Inheritance: 'top',
   Reference: 'right',
+  CrossReference: 'right',
   ServiceDep: 'left',
   Containment: 'bottom',
 }
@@ -288,6 +293,7 @@ const HANDLE_POS: Record<Side, Position> = {
 const EDGE_COLOR: Record<string, string> = {
   Inheritance: '#94a3b8',
   Reference: '#38bdf8',
+  CrossReference: '#f59e0b',   // amber — a cross-site reference, visually distinct from the sky-blue intra Reference
   ServiceDep: '#c084fc',
   Containment: '#34d399',
 }
@@ -858,24 +864,32 @@ const edgeTypes = { assoc: AssocEdge }
 
 type AddStubData = {
   side: Side
-  kind: string
-  candidates: DesignableType[] // valid targets for this kind
+  kinds: string[] // the kind(s) this side may create; >1 (right side: Reference/CrossReference) renders a toggle
+  allTypes: DesignableType[] // candidate pool — filtered per chosen kind via candidatesFor
+  selKey: string // the selected type's key, excluded from candidates
   onAdd: (assoc: Association) => void
 }
 
 function AddStubNode({ data }: NodeProps) {
   const d = data as unknown as AddStubData
   const [open, setOpen] = useState(false)
+  const [kind, setKind] = useState(d.kinds[0])
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
-  const named = d.kind !== 'Inheritance'
+  const named = kind !== 'Inheritance'
+  const candidates = candidatesFor(kind, d.allTypes, d.selKey)
   const valid = target !== '' && (!named || name.trim().length > 0)
+  // Switching kind can invalidate the picked target (e.g. Reference→CrossReference narrows to interfaces).
+  const pickKind = (k: string) => {
+    setKind(k)
+    if (target && !candidatesFor(k, d.allTypes, d.selKey).some((c) => key(c) === target)) setTarget('')
+  }
 
   if (!open)
     return (
       <div className="add-stub">
         <NodeHandles />
-        <button className="add-stub-btn" title={'add ' + d.kind} onClick={() => setOpen(true)}>
+        <button className="add-stub-btn" title={'add ' + d.kinds.join('/')} onClick={() => setOpen(true)}>
           +
         </button>
       </div>
@@ -885,12 +899,27 @@ function AddStubNode({ data }: NodeProps) {
     <div className="add-stub open">
       <NodeHandles />
       <div className="stub-form" onClick={(e) => e.stopPropagation()}>
-        <div className="stub-kind" style={{ color: EDGE_COLOR[d.kind] }}>
-          {d.kind}
-        </div>
+        {d.kinds.length > 1 ? (
+          <div className="stub-kind-toggle">
+            {d.kinds.map((k) => (
+              <button
+                key={k}
+                className={'stub-kind-opt' + (k === kind ? ' sel' : '')}
+                style={k === kind ? { color: EDGE_COLOR[k], borderColor: EDGE_COLOR[k] } : undefined}
+                onClick={() => pickKind(k)}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="stub-kind" style={{ color: EDGE_COLOR[kind] }}>
+            {kind}
+          </div>
+        )}
         <select className="stub-target" value={target} onChange={(e) => setTarget(e.target.value)}>
           <option value="">target…</option>
-          {d.candidates.map((c) => (
+          {candidates.map((c) => (
             <option key={key(c)} value={key(c)}>
               {c.name}
             </option>
@@ -903,7 +932,7 @@ function AddStubNode({ data }: NodeProps) {
           <button
             className="mf-save"
             disabled={!valid}
-            onClick={() => valid && d.onAdd({ kind: d.kind, name: named ? name.trim() : '', target })}
+            onClick={() => valid && d.onAdd({ kind, name: named ? name.trim() : '', target })}
           >
             Add
           </button>
@@ -1011,12 +1040,14 @@ type GraphHandlers = Omit<ClassNodeData, 't'> & {
   onDeleteAssoc: (ref: Association) => void
 }
 
-/// Valid target types for a new association of the given kind (services/interfaces for a service-dep;
-/// any other type otherwise), excluding the type itself.
+/// Valid target types for a new association of the given kind, excluding the type itself:
+///   ServiceDep → services/interfaces; CrossReference → interfaces only (a cross-site reference must target an
+///   interface); anything else (Reference/Containment/Inheritance) → any other type.
 function candidatesFor(kind: string, allTypes: DesignableType[], selKey: string) {
   const pool = allTypes.filter((t) => key(t) !== selKey)
   if (kind === 'ServiceDep')
     return pool.filter((t) => t.kind === 'Service' || t.kind === 'LooselyCoupledService' || t.kind === 'Interface')
+  if (kind === 'CrossReference') return pool.filter((t) => t.kind === 'Interface')
   return pool
 }
 
@@ -1053,12 +1084,11 @@ function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: 
       nodes.push({ id: tk, type: 'typeChip', position: placeSide(side, i, count), data: { t: byKey.get(tk)! } })
     })
     if (!showStub) continue
-    const kind = KIND_OF_SIDE[side]
     nodes.push({
       id: 'stub:' + side,
       type: 'addStub',
       position: placeSide(side, bySide[side].length, count),
-      data: { side, kind, candidates: candidatesFor(kind, h.allTypes, selKey), onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
+      data: { side, kinds: KINDS_OF_SIDE[side], allTypes: h.allTypes, selKey, onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
     })
     edges.push({
       id: 'stub-e:' + side,
@@ -1094,8 +1124,9 @@ function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: 
   return { nodes, edges }
 }
 
-// Which association kind each side creates.
-const KIND_OF_SIDE: Record<Side, string> = { top: 'Inheritance', right: 'Reference', left: 'ServiceDep', bottom: 'Containment' }
+// Which association kind(s) each side creates. The right side offers a choice — an intra-site Reference or a
+// cross-site CrossReference — so its add-stub renders a toggle; the other sides have a single kind.
+const KINDS_OF_SIDE: Record<Side, string[]> = { top: ['Inheritance'], right: ['Reference', 'CrossReference'], left: ['ServiceDep'], bottom: ['Containment'] }
 
 // Which associations a type may *own*, so add-stubs only appear where they're legal:
 //   containment / references are model-only decorators; a [ServiceRef] lives on a model or a service;
@@ -1427,23 +1458,26 @@ function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: S
   )
 }
 
-// ── References view (edit-references button): wire [References<T>] / [ServiceRef] across the whole assembly ──────────
+// ── References view (edit-references button): wire [Reference<T>] / [CrossReference<T>] / [ServiceRef] across the whole assembly ──
 
-type RefField = { name: string; target: string }
+// A wirable reference field. `isCross` is the field's design kind — false for an intra-site [Reference<T>], true for a
+// cross-site [CrossReference<T>] — so wiring can file the binding under the right YAML block.
+type RefField = { name: string; target: string; isCross: boolean }
 // The data helpers the references view needs (supplied by the app); RefsView adds the view-local onWire below.
 type RefsData = {
   refFieldsOf: (type: string) => RefField[]
   serviceRefsOf: (type: string) => { member: string; target: string }[]
   assignable: (type: string, T: string) => boolean // is an instance/service of `type` assignable to reference target `T`
   services: { name: string; type: string }[] // the assembly's service instances (for the [ServiceRef] dropdown)
-  onSetReference: (asm: string, path: string, name: string, targets: string[]) => void
+  onSetReference: (asm: string, path: string, name: string, targets: string[], isCross: boolean) => void
   onSetServiceDep: (asm: string, path: string, member: string, service: string) => void
 }
-type RefsCtx = RefsData & { asmPath: string; onWire: (path: string, name: string, target: string) => void }
+type RefsCtx = RefsData & { asmPath: string; onWire: (path: string, name: string, target: string, isCross: boolean) => void }
 
 const shortName = (fqn: string) => (fqn.includes('.') ? fqn.slice(fqn.lastIndexOf('.') + 1) : fqn)
 
-// A node in the references forest. Enlarged (and not wiring) it lists its type's [References<T>] fields (click → wiring)
+// A node in the references forest. Enlarged (and not wiring) it lists its type's reference fields (both [Reference<T>]
+// and [CrossReference<T>]) (click → wiring)
 // and [ServiceRef] fields (a service dropdown). While wiring, every node is tinted lit/wirable/disabled instead.
 function RefNode({ data }: NodeProps) {
   const d = data as {
@@ -1472,7 +1506,12 @@ function RefNode({ data }: NodeProps) {
           {refFields.map((f) => {
             const n = inst.refs.find((r) => r.name === f.name)?.targets.length ?? 0
             return (
-              <button key={'ref:' + f.name} className="ref-field" onClick={() => ctx.onWire(d.path, f.name, f.target)}>
+              <button
+                key={'ref:' + f.name}
+                className={'ref-field' + (f.isCross ? ' cross' : '')}
+                title={f.isCross ? 'cross-site [CrossReference]' : 'intra-site [Reference]'}
+                onClick={() => ctx.onWire(d.path, f.name, f.target, f.isCross)}
+              >
                 <span className="ref-field-name">{f.name}</span>
                 <span className="ref-field-t">→ {shortName(f.target)}{n ? ` · ${n}` : ''}</span>
               </button>
@@ -1509,7 +1548,7 @@ const refsNodeTypes = { refnode: RefNode }
 function buildRefsGraph(
   asm: AssemblyModel,
   enlarged: string | null,
-  wiring: { path: string; name: string; target: string } | null,
+  wiring: { path: string; name: string; target: string; isCross: boolean } | null,
   wiringTargets: string[],
   ctx: RefsCtx,
 ): { nodes: Node[]; edges: Edge[] } {
@@ -1545,7 +1584,7 @@ function buildRefsGraph(
 
 function RefsView({ asm, data, rev, onBack }: { asm: AssemblyModel; data: RefsData; rev: number; onBack: () => void }) {
   const [enlarged, setEnlarged] = useState<string | null>(null)
-  const [wiring, setWiring] = useState<{ path: string; name: string; target: string } | null>(null)
+  const [wiring, setWiring] = useState<{ path: string; name: string; target: string; isCross: boolean } | null>(null)
 
   const findByPath = (path: string): ModelInstance | null => {
     const segs = pathSegs(path, asm.name)
@@ -1569,10 +1608,10 @@ function RefsView({ asm, data, rev, onBack }: { asm: AssemblyModel; data: RefsDa
     return () => window.removeEventListener('keydown', onKey)
   }, [wiring, enlarged, onBack])
 
-  const ctx: RefsCtx = { ...data, asmPath: asm.path, onWire: (path, name, target) => setWiring({ path, name, target }) }
+  const ctx: RefsCtx = { ...data, asmPath: asm.path, onWire: (path, name, target, isCross) => setWiring({ path, name, target, isCross }) }
   const { nodes, edges } = buildRefsGraph(asm, enlarged, wiring, wiringTargets, ctx)
 
-  const setTargets = (targets: string[]) => wiring && data.onSetReference(asm.path, wiring.path, wiring.name, targets)
+  const setTargets = (targets: string[]) => wiring && data.onSetReference(asm.path, wiring.path, wiring.name, targets, wiring.isCross)
   const reorder = (i: number, dir: -1 | 1) => {
     const arr = [...wiringTargets]
     ;[arr[i], arr[i + dir]] = [arr[i + dir], arr[i]]
@@ -1979,12 +2018,13 @@ export default function App() {
     return m
   }, [working])
 
-  // Each known type → its [References<T>] field names and its [ServiceRef] member names (from the design IR). Used to
-  // prune instance ref/dep bindings whose field no longer exists (else the generator wires a missing reference).
+  // Each known type → its reference field names (both intra [Reference<T>] and cross [CrossReference<T>]) and its
+  // [ServiceRef] member names (from the design IR). Used to prune instance ref/dep bindings whose field no longer
+  // exists (else the generator wires a missing reference).
   const typeRefNames = useMemo(() => {
     const m = new Map<string, Set<string>>()
     for (const t of working?.types ?? [])
-      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'Reference').map((a) => a.name)))
+      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'Reference' || a.kind === 'CrossReference').map((a) => a.name)))
     return m
   }, [working])
   const typeDepMembers = useMemo(() => {
@@ -2103,7 +2143,7 @@ export default function App() {
       if (!valid) return config // not a known project type — can't validate, leave as-is
       return Object.fromEntries(Object.entries(config).filter(([k]) => valid.includes(k)))
     }
-    // Drop ref/dep bindings whose [References<T>]/[ServiceRef] field was removed in Design (mirrors the Config prune).
+    // Drop ref/dep bindings whose [Reference<T>]/[CrossReference<T>]/[ServiceRef] field was removed in Design (mirrors the Config prune).
     const pruneRefs = (refs: ReferenceBinding[], type: string) => {
       const valid = typeRefNames.get(type)
       return valid ? refs.filter((r) => valid.has(r.name)) : refs
@@ -2170,14 +2210,17 @@ export default function App() {
   const onSetInstanceConfig = (asm: string, path: string, key: string, value: string) =>
     dispatch({ op: 'setInstanceConfig', asm, path, key, value })
 
-  // References view helpers: a type's [References<T>] / [ServiceRef] fields, and one-level assignability to a target T.
+  // References view helpers: a type's reference fields (intra [Reference<T>] tagged isCross:false, cross
+  // [CrossReference<T>] tagged isCross:true) / [ServiceRef] fields, and one-level assignability to a target T.
   const refFieldsOf = (fqType: string) =>
-    working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'Reference').map((a) => ({ name: a.name, target: a.target })) ?? []
+    working?.types.find((t) => key(t) === fqType)?.associations
+      .filter((a) => a.kind === 'Reference' || a.kind === 'CrossReference')
+      .map((a) => ({ name: a.name, target: a.target, isCross: a.kind === 'CrossReference' })) ?? []
   const serviceRefsOf = (fqType: string) =>
     working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'ServiceDep').map((a) => ({ member: a.name, target: a.target })) ?? []
   const assignable = (type: string, target: string) =>
     type === target || !!working?.types.find((t) => key(t) === type)?.associations.some((a) => a.kind === 'Inheritance' && a.target === target)
-  const onSetReference = (asm: string, path: string, name: string, targets: string[]) => dispatch({ op: 'setReference', asm, path, name, targets })
+  const onSetReference = (asm: string, path: string, name: string, targets: string[], isCross: boolean) => dispatch({ op: 'setReference', asm, path, name, targets, isCross })
   const onSetServiceDep = (asm: string, path: string, member: string, service: string) => dispatch({ op: 'setServiceDep', asm, path, member, service })
   const refsData: RefsData = { refFieldsOf, serviceRefsOf, assignable, services: drilledRefs?.services ?? [], onSetReference, onSetServiceDep }
 

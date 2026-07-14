@@ -49,11 +49,14 @@ public sealed class ProjectWorkspaceTests
             Assert.That(env!.Members.Any(m => m.Name == "SunAngle" && m.Facets.Contains("ServiceEvent")), "Env SunAngle event");
             Assert.That(env.Members.Any(m => m.Name == "CurrentAngle" && m.Facets.Contains("ServiceRequest")), "Env CurrentAngle request");
 
-            // Associations: Eps contains Batteries, references Consumers; Heater implements IPowerConsumer.
+            // Associations: Eps contains Batteries, holds an intra-site Reference to its Cells and a cross-site
+            // CrossReference to its Consumers; Heater implements IPowerConsumer.
             Assert.That(eps!.Associations.Any(a => a is { Kind: "Containment", Name: "Batteries" } && a.Target.EndsWith(".Battery")),
                 "Eps [Contains<Battery>(\"Batteries\")]");
-            Assert.That(eps.Associations.Any(a => a is { Kind: "Reference", Name: "Consumers" } && a.Target.EndsWith(".IPowerConsumer")),
-                "Eps [References<IPowerConsumer>(\"Consumers\")]");
+            Assert.That(eps.Associations.Any(a => a is { Kind: "Reference", Name: "Cells" } && a.Target.EndsWith(".Battery")),
+                "Eps [Reference<Battery>(\"Cells\")]");
+            Assert.That(eps.Associations.Any(a => a is { Kind: "CrossReference", Name: "Consumers" } && a.Target.EndsWith(".IPowerConsumer")),
+                "Eps [CrossReference<IPowerConsumer>(\"Consumers\")]");
             Assert.That(heater!.Associations.Any(a => a is { Kind: "Inheritance" } && a.Target.EndsWith(".IPowerConsumer")),
                 "Heater : IPowerConsumer");
             Assert.That(eps.Associations.Any(a => a is { Kind: "ServiceDep", Name: "Environment" } && a.Target.EndsWith(".Environment")),

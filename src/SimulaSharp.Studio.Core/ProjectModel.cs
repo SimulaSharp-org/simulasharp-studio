@@ -13,7 +13,8 @@ public sealed record MemberRow(string Name, string? Type, IReadOnlyList<string> 
 /// <summary>
 /// A directed association from one designable type to another. <paramref name="Kind"/> is
 /// <c>Inheritance</c> (base class / implemented interface), <c>Containment</c> (<c>[Contains&lt;T&gt;]</c>),
-/// <c>Reference</c> (<c>[References&lt;T&gt;]</c>) or <c>ServiceDep</c> (a <c>[ServiceRef]</c> member).
+/// <c>Reference</c> (<c>[Reference&lt;T&gt;]</c>, intra-site), <c>CrossReference</c> (<c>[CrossReference&lt;T&gt;]</c>,
+/// cross-site) or <c>ServiceDep</c> (a <c>[ServiceRef]</c> member).
 /// <paramref name="Name"/> is the association's declared name where it has one (the container / reference /
 /// member name; empty for inheritance). <paramref name="Target"/> is the target type's key
 /// (<c>Namespace.Name</c>), which the UI resolves to a node.

@@ -23,7 +23,9 @@ internal static class AssemblyYaml
     private static ModelInstance ToInstance(ModelNode n) => new(
         n.Name, n.Type, n.Config ?? new(),
         (n.Models ?? []).SelectMany(d => d).Select(kv => new Container(kv.Key, (kv.Value ?? []).Select(ToInstance).ToList())).ToList(),
-        (n.Refs ?? []).SelectMany(d => d).Select(kv => new ReferenceBinding(kv.Key, kv.Value ?? [])).ToList(),
+        (n.Refs ?? []).SelectMany(d => d).Select(kv => new ReferenceBinding(kv.Key, kv.Value ?? [], false))
+            .Concat((n.CRefs ?? []).SelectMany(d => d).Select(kv => new ReferenceBinding(kv.Key, kv.Value ?? [], true)))
+            .ToList(),
         ToDeps(n.Deps));
 
     private static IReadOnlyList<DepBinding> ToDeps(List<Dictionary<string, string>>? deps) =>
@@ -63,9 +65,19 @@ internal static class AssemblyYaml
         Type = m.Type,
         Config = Nullify(m.Config),
         Models = m.Containers.Count == 0 ? null : m.Containers.Select(c => new Dictionary<string, List<ModelNode>> { [c.Name] = c.Children.Select(FromInstance).ToList() }).ToList(),
-        Refs = m.Refs.Count == 0 ? null : m.Refs.Select(r => new Dictionary<string, List<string>> { [r.Name] = r.Targets.ToList() }).ToList(),
+        Refs = RefBlock(m.Refs.Where(r => !r.IsCross)),
+        CRefs = RefBlock(m.Refs.Where(r => r.IsCross)),
         Deps = FromDeps(m.Deps),
     };
+
+    /// <summary>Renders a subset of a model's reference bindings as a YAML descriptor block (one single-entry map per
+    /// binding), or <c>null</c> when the subset is empty so the block is omitted. Used to split <see cref="ModelInstance.Refs"/>
+    /// into the intra-site <c>Refs:</c> and cross-site <c>CRefs:</c> blocks by <see cref="ReferenceBinding.IsCross"/>.</summary>
+    private static List<Dictionary<string, List<string>>>? RefBlock(IEnumerable<ReferenceBinding> refs)
+    {
+        var block = refs.Select(r => new Dictionary<string, List<string>> { [r.Name] = r.Targets.ToList() }).ToList();
+        return block.Count == 0 ? null : block;
+    }
 
     private static List<Dictionary<string, string>>? FromDeps(IReadOnlyList<DepBinding> deps) =>
         deps.Count == 0 ? null : deps.Select(d => new Dictionary<string, string> { [d.Member] = d.Service }).ToList();
@@ -106,7 +118,10 @@ internal static class AssemblyYaml
         public string Type { get; set; } = "";
         public Dictionary<string, string>? Config { get; set; }
         public List<Dictionary<string, List<ModelNode>>>? Models { get; set; }
+        /// <summary>Intra-site <c>[Reference&lt;T&gt;]</c> bindings.</summary>
         public List<Dictionary<string, List<string>>>? Refs { get; set; }
+        /// <summary>Cross-site <c>[CrossReference&lt;T&gt;]</c> bindings.</summary>
+        public List<Dictionary<string, List<string>>>? CRefs { get; set; }
         public List<Dictionary<string, string>>? Deps { get; set; }
     }
 }

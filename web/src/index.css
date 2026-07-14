@@ -255,6 +255,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   cursor: pointer;
 }
 .ref-field:hover { background: #0e4a5a; }
+/* Cross-site [CrossReference] fields wear the amber accent used for their edges, to set them apart from intra refs. */
+.ref-field.cross { border-color: #b45309; background: #3a2708; color: #fcd9a5; }
+.ref-field.cross:hover { background: #4a3410; }
 .ref-field-name { font-weight: 600; }
 .ref-field-t { opacity: 0.7; }
 .ref-dep { display: flex; align-items: center; gap: 8px; font-size: 11px; }
@@ -750,6 +753,23 @@ body { font-family: system-ui, 'Segoe UI', Roboto, sans-serif; color: #dbeafe; }
   background: #0b1020;
 }
 .stub-kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+/* Reference / CrossReference chooser on the right-side add-stub. The selected option is tinted its edge colour inline. */
+.stub-kind-toggle { display: flex; gap: 4px; }
+.stub-kind-opt {
+  flex: 1;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 4px;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  background: #0b1020;
+  color: #64748b;
+  cursor: pointer;
+}
+.stub-kind-opt.sel { background: #0f1830; }
 .stub-form select,
 .stub-form input {
   font: inherit;

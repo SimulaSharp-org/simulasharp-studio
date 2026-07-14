@@ -23,8 +23,16 @@ public sealed class TopologyGeneratorTests
                 Assert.That(yaml, Does.Contain("DemoSim.Services.Environment"), "service type");
                 Assert.That(yaml, Does.Contain("Batteries"), "container name");
                 Assert.That(yaml, Does.Contain("CapacityWh"), "config key");
-                Assert.That(yaml, Does.Contain("Consumers"), "reference name");
-                Assert.That(yaml, Does.Contain("DemoSim.Heater"), "reference target");
+                // The intra Reference lands under Refs:, the cross CrossReference under CRefs:.
+                Assert.That(yaml, Does.Contain("Refs:"), "intra Refs block");
+                Assert.That(yaml, Does.Contain("Cells"), "intra reference name");
+                Assert.That(yaml, Does.Contain("CRefs:"), "cross CRefs block");
+                Assert.That(yaml, Does.Contain("Consumers"), "cross reference name");
+                Assert.That(yaml, Does.Contain("DemoSim.Heater"), "cross reference target");
+                // The cross binding must sit under CRefs:, not Refs: — assert its ordering relative to the block headers.
+                int crefs = yaml.IndexOf("CRefs:", StringComparison.Ordinal);
+                Assert.That(crefs, Is.GreaterThan(0));
+                Assert.That(yaml.IndexOf("Consumers", StringComparison.Ordinal), Is.GreaterThan(crefs), "Consumers under CRefs:");
             });
         }
         finally
