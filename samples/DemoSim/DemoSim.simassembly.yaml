@@ -4,6 +4,8 @@ Simulator:
   - Name: Environment
     Type: DemoSim.Services.Environment
   Sites:
+  # The Bus site holds the EPS and its batteries. Consumers live on their own Loads site, so the EPS→consumer
+  # reference genuinely crosses a site boundary (a CrossReference), while EPS→battery stays same-site (a Reference).
   - Name: Bus
     MaxEvents: 64
     Models:
@@ -19,11 +21,18 @@ Simulator:
           Type: DemoSim.Power.Battery
           Config:
             CapacityWh: 2000
-      Refs:
+      Refs:                       # intra-site [Reference<Battery>] — the contained batteries, same site
+      - Cells:
+        - DemoSim.Eps.Bat1
+        - DemoSim.Eps.Bat2
+      CRefs:                      # cross-site [CrossReference<IPowerConsumer>] — a consumer on the Loads site
       - Consumers:
         - DemoSim.Heater
       Deps:
       - Environment: Environment
+  - Name: Loads
+    MaxEvents: 64
+    Models:
     - Name: Heater
       Type: DemoSim.Power.Heater
       Config:
