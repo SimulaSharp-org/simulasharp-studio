@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ReactFlow,
   Background,
@@ -17,7 +18,8 @@ import {
 import * as signalR from '@microsoft/signalr'
 import '@xyflow/react/dist/style.css'
 
-type MemberRow = { name: string; type: string | null; facets: string[]; params?: string | null }
+type ParamDto = { name: string; type: string }
+type MemberRow = { name: string; type: string | null; facets: string[]; params?: ParamDto[] | null }
 type Association = { kind: string; name: string; target: string }
 type DesignableType = {
   namespace: string
@@ -27,6 +29,39 @@ type DesignableType = {
   associations: Association[]
 }
 type ProjectModel = { name: string; path: string; types: DesignableType[] }
+
+// ── Type catalog / Type Selector (backend-served, searched per query) ────────────
+type TypeRefDto = {
+  name: string
+  fqn: string
+  namespace: string
+  category: string
+  volatile: boolean
+  marshalable: boolean
+  bcl: boolean
+  abstract: boolean
+}
+type TypeQueryReq = { filter: number; includeBcl: boolean; includeAbstractClasses: boolean; query: string }
+type TypeQueryResult = { total: number; items: TypeRefDto[] }
+
+// The TypeFilter [Flags] enum, mirrored from the backend (OR-able; ALL = every bit).
+const TF = { Volatile: 1, Marshalable: 2, Models: 4, Interfaces: 8, Services: 16 } as const
+const TF_ALL = TF.Volatile | TF.Marshalable | TF.Models | TF.Interfaces | TF.Services
+
+// The picker queries the backend through this singleton (set once the connection + project path are known), so the
+// deeply-nested consumers (member forms, association stubs — rendered inside React Flow nodes) don't need it threaded.
+const typeCatalog: { path: string; query: ((q: TypeQueryReq) => Promise<TypeQueryResult>) | null } = { path: '', query: null }
+
+// Canonical fqns (as stored on member/param types) → a short display label: a C# alias for primitives, else the
+// simple name. Used to render a picked type compactly.
+const PRIM_ALIAS: Record<string, string> = {
+  'System.Int32': 'int', 'System.UInt32': 'uint', 'System.Int64': 'long', 'System.UInt64': 'ulong',
+  'System.Int16': 'short', 'System.UInt16': 'ushort', 'System.Byte': 'byte', 'System.SByte': 'sbyte',
+  'System.Double': 'double', 'System.Single': 'float', 'System.Decimal': 'decimal',
+  'System.Boolean': 'bool', 'System.Char': 'char', 'System.String': 'string', 'System.Object': 'object', 'System.Void': 'void',
+}
+const displayType = (fqn: string | null | undefined): string =>
+  !fqn ? '' : (PRIM_ALIAS[fqn] ?? (fqn.includes('.') ? fqn.slice(fqn.lastIndexOf('.') + 1) : fqn))
 
 // ── Assembly topology (read-only for now) ───────────────────────────────────────
 type DepBinding = { member: string; service: string }
@@ -594,6 +629,115 @@ function NewTypeDialog({ stable, onCreate, onCancel }: { stable: string; onCreat
   )
 }
 
+// ── Type Selector: a modal, searchable, namespace-grouped type picker ─────────────
+// Backed by the backend catalog (queried per keystroke through `typeCatalog`, debounced). `filter` is the OR-ed
+// TypeFilter bitmask for the slot; `includeAbstract` admits abstract classes (e.g. a Contains/Reference target). When
+// the match count exceeds the backend cap the item list comes back empty and we ask the user to narrow the search.
+
+function TypeSelector({
+  filter,
+  includeAbstract = false,
+  title = 'Select a type',
+  value,
+  onPick,
+  onClose,
+}: {
+  filter: number
+  includeAbstract?: boolean
+  title?: string
+  value?: string | null
+  onPick: (fqn: string) => void
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [includeBcl, setIncludeBcl] = useState(false)
+  const [result, setResult] = useState<TypeQueryResult | null>(null)
+  const seq = useRef(0)
+
+  // Debounced query on mount + whenever the search / BCL toggle change; a sequence id drops out-of-order responses.
+  useEffect(() => {
+    const q = typeCatalog.query
+    if (!q) {
+      setResult({ total: 0, items: [] })
+      return
+    }
+    const id = ++seq.current
+    const handle = setTimeout(() => {
+      q({ filter, includeBcl, includeAbstractClasses: includeAbstract, query: query.trim() })
+        .then((r) => id === seq.current && setResult(r))
+        .catch(() => id === seq.current && setResult({ total: 0, items: [] }))
+    }, 150)
+    return () => clearTimeout(handle)
+  }, [filter, includeAbstract, includeBcl, query])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Group the (backend-sorted) items by namespace — an auto-expanded tree over the narrowed set.
+  const groups = useMemo(() => {
+    const m = new Map<string, TypeRefDto[]>()
+    for (const it of result?.items ?? []) {
+      const ns = it.namespace || '(global)'
+      const arr = m.get(ns)
+      if (arr) arr.push(it)
+      else m.set(ns, [it])
+    }
+    return [...m.entries()]
+  }, [result])
+
+  const overflow = (result?.total ?? 0) > 0 && (result?.items.length ?? 0) === 0
+
+  return createPortal(
+    <div className="tsel-overlay" onClick={onClose}>
+      <div className="tsel" onClick={(e) => e.stopPropagation()}>
+        <div className="tsel-head">
+          <span className="tsel-title">{title}</span>
+          <button className="tsel-close" onClick={onClose} title="close (Esc)">
+            ×
+          </button>
+        </div>
+        <div className="tsel-controls">
+          <input className="tsel-search" autoFocus placeholder="search a type…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <label className="tsel-bcl" title="include .NET framework (System.*/Microsoft.*) types">
+            <input type="checkbox" checked={includeBcl} onChange={(e) => setIncludeBcl(e.target.checked)} /> BCL
+          </label>
+        </div>
+        <div className="tsel-body">
+          {result === null ? (
+            <div className="tsel-msg">searching…</div>
+          ) : overflow ? (
+            <div className="tsel-msg">{result.total} matches — search a type to narrow down the results</div>
+          ) : result.items.length === 0 ? (
+            <div className="tsel-msg">no matching types</div>
+          ) : (
+            groups.map(([ns, items]) => (
+              <div key={ns} className="tsel-group">
+                <div className="tsel-ns">{ns}</div>
+                {items.map((it) => (
+                  <button key={it.fqn} className={'tsel-item' + (it.fqn === value ? ' sel' : '')} title={it.fqn} onClick={() => onPick(it.fqn)}>
+                    <span className={'tsel-cat c-' + it.category}>{it.category[0]}</span>
+                    <span className="tsel-name">{it.name}</span>
+                    {it.abstract && <span className="tsel-tag">abstract</span>}
+                  </button>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 // ── The member mini-form ─────────────────────────────────────────────────────────
 // Shared by add (initial null) and edit (initial = the member). Governs name, type and the member's
 // attribute set. At least one attribute is required — Save stays disabled until name and ≥1 attribute
@@ -611,15 +755,30 @@ function MemberForm({
   onCancel: () => void
 }) {
   const [name, setName] = useState(initial?.name ?? '')
-  const [type, setType] = useState(initial?.type ?? '')
-  const [params, setParams] = useState(initial?.params ?? '')
+  const [type, setType] = useState<string>(initial?.type ?? '')
+  const [params, setParams] = useState<ParamDto[]>(initial?.params ?? [])
   const [facets, setFacets] = useState<string[]>(initial?.facets ?? [])
+  // Which type slot (if any) has the Type Selector open: the member's own type, or a parameter by index.
+  const [picking, setPicking] = useState<null | { slot: 'type' } | { slot: 'param'; i: number }>(null)
 
   const catalog = FACETS_BY_KIND[kind] ?? []
   const single = kind === 'Interface' // a member is a Property XOR a Method
   const addable = catalog.filter((f) => !facets.includes(f))
   const isMethod = facets.includes('Method') || facets.includes('ServiceRequest') // takes a signature, not just a type
+  const isEvent = facets.includes('ServiceEvent')
+  const isRequest = facets.includes('ServiceRequest')
+  const optionalType = isMethod || isEvent // a method may return void; an event context is optional
   const valid = name.trim().length > 0 && facets.length > 0
+
+  // The member's own type slot is constrained by what it carries: a knob/plottable is a volatile gauge value; a
+  // parameter or a service payload/return is a marshalable value; an interface property or a method return is anything.
+  const typeFilter =
+    facets.includes('Knob') || facets.includes('Plottable') ? TF.Volatile :
+    facets.includes('Parameter') || isEvent || isRequest ? TF.Marshalable :
+    TF_ALL
+  // Interface-method parameters accept any type; a service request's single context is marshalable.
+  const paramFilter = isRequest ? TF.Marshalable : TF_ALL
+  const canAddParam = !isRequest || params.length < 1 // a request carries at most one context
 
   const commit = () =>
     valid &&
@@ -627,7 +786,7 @@ function MemberForm({
       name: name.trim(),
       type: type.trim() || null,
       facets,
-      params: isMethod ? params.trim() || null : null,
+      params: isMethod ? params.filter((p) => p.name.trim()) : null,
     })
 
   return (
@@ -641,21 +800,51 @@ function MemberForm({
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && commit()}
         />
-        <input
-          className="mf-type"
-          placeholder={isMethod ? 'returns' : 'type'}
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && commit()}
-        />
+        <button className="mf-typeslot" title={type || undefined} onClick={() => setPicking({ slot: 'type' })}>
+          {type ? displayType(type) : isMethod ? 'returns…' : 'type…'}
+        </button>
+        {optionalType && type && (
+          <button className="mf-typeclear" title={isMethod ? 'return void' : 'no context'} onClick={() => setType('')}>
+            ∅
+          </button>
+        )}
       </div>
       {isMethod && (
-        <input
-          className="mf-params"
-          placeholder="parameters, e.g. int slot, double watts"
-          value={params}
-          onChange={(e) => setParams(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && commit()}
+        <div className="mf-params">
+          {params.map((p, i) => (
+            <div key={i} className="mf-param">
+              <input
+                className="mf-param-name"
+                placeholder="name"
+                value={p.name}
+                onChange={(e) => setParams(params.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)))}
+              />
+              <button className="mf-typeslot" title={p.type || undefined} onClick={() => setPicking({ slot: 'param', i })}>
+                {p.type ? displayType(p.type) : 'type…'}
+              </button>
+              <button className="mf-param-del" title="remove parameter" onClick={() => setParams(params.filter((_, j) => j !== i))}>
+                ×
+              </button>
+            </div>
+          ))}
+          {canAddParam && (
+            <button className="mf-param-add" onClick={() => setParams([...params, { name: '', type: '' }])}>
+              + {isRequest ? 'context' : 'param'}
+            </button>
+          )}
+        </div>
+      )}
+      {picking && (
+        <TypeSelector
+          filter={picking.slot === 'type' ? typeFilter : paramFilter}
+          value={picking.slot === 'type' ? type : params[picking.i]?.type ?? null}
+          title={picking.slot === 'type' ? (isMethod ? 'Return type' : 'Type') : 'Parameter type'}
+          onPick={(fqn) => {
+            if (picking.slot === 'type') setType(fqn)
+            else setParams(params.map((q, j) => (j === picking.i ? { ...q, type: fqn } : q)))
+            setPicking(null)
+          }}
+          onClose={() => setPicking(null)}
         />
       )}
       <div className="mf-facets">
@@ -865,8 +1054,6 @@ const edgeTypes = { assoc: AssocEdge }
 type AddStubData = {
   side: Side
   kinds: string[] // the kind(s) this side may create; >1 (right side: Reference/CrossReference) renders a toggle
-  allTypes: DesignableType[] // candidate pool — filtered per chosen kind via candidatesFor
-  selKey: string // the selected type's key, excluded from candidates
   onAdd: (assoc: Association) => void
 }
 
@@ -876,13 +1063,13 @@ function AddStubNode({ data }: NodeProps) {
   const [kind, setKind] = useState(d.kinds[0])
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
+  const [picking, setPicking] = useState(false)
   const named = kind !== 'Inheritance'
-  const candidates = candidatesFor(kind, d.allTypes, d.selKey)
   const valid = target !== '' && (!named || name.trim().length > 0)
-  // Switching kind can invalidate the picked target (e.g. Reference→CrossReference narrows to interfaces).
+  // Switching kind changes the acceptable targets (e.g. Reference→CrossReference narrows to interfaces), so re-pick.
   const pickKind = (k: string) => {
     setKind(k)
-    if (target && !candidatesFor(k, d.allTypes, d.selKey).some((c) => key(c) === target)) setTarget('')
+    setTarget('')
   }
 
   if (!open)
@@ -917,14 +1104,22 @@ function AddStubNode({ data }: NodeProps) {
             {kind}
           </div>
         )}
-        <select className="stub-target" value={target} onChange={(e) => setTarget(e.target.value)}>
-          <option value="">target…</option>
-          {candidates.map((c) => (
-            <option key={key(c)} value={key(c)}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+        <button className="stub-target" title={target || undefined} onClick={() => setPicking(true)}>
+          {target ? displayType(target) : 'target…'}
+        </button>
+        {picking && (
+          <TypeSelector
+            filter={ASSOC_FILTER[kind].filter}
+            includeAbstract={ASSOC_FILTER[kind].abstract}
+            title={kind + ' target'}
+            value={target || null}
+            onPick={(fqn) => {
+              setTarget(fqn)
+              setPicking(false)
+            }}
+            onClose={() => setPicking(false)}
+          />
+        )}
         {named && (
           <input className="stub-name" placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
         )}
@@ -981,9 +1176,10 @@ function ClassNode({ data }: NodeProps) {
                 }}
               >
                 {m.name}
-                {(m.facets.includes('Method') || m.facets.includes('ServiceRequest')) && `(${m.params ?? ''})`}
+                {(m.facets.includes('Method') || m.facets.includes('ServiceRequest')) &&
+                  `(${(m.params ?? []).map((p) => `${displayType(p.type)} ${p.name}`).join(', ')})`}
               </span>
-              {m.type && <span className="mtype">{m.type}</span>}
+              {m.type && <span className="mtype">{displayType(m.type)}</span>}
               <button className="mdel" title="delete member" onClick={() => onDelete(m.name)}>
                 ×
               </button>
@@ -1034,21 +1230,20 @@ function ClassNode({ data }: NodeProps) {
 const nodeTypes = { classNode: ClassNode, typeChip: TypeChipNode, addStub: AddStubNode }
 
 type GraphHandlers = Omit<ClassNodeData, 't'> & {
-  allTypes: DesignableType[]
   onAddAssoc: (assoc: Association) => void
   onRenameAssoc: (ref: Association, to: string) => void
   onDeleteAssoc: (ref: Association) => void
 }
 
-/// Valid target types for a new association of the given kind, excluding the type itself:
-///   ServiceDep → services/interfaces; CrossReference → interfaces only (a cross-site reference must target an
-///   interface); anything else (Reference/Containment/Inheritance) → any other type.
-function candidatesFor(kind: string, allTypes: DesignableType[], selKey: string) {
-  const pool = allTypes.filter((t) => key(t) !== selKey)
-  if (kind === 'ServiceDep')
-    return pool.filter((t) => t.kind === 'Service' || t.kind === 'LooselyCoupledService' || t.kind === 'Interface')
-  if (kind === 'CrossReference') return pool.filter((t) => t.kind === 'Interface')
-  return pool
+// The Type Selector filter for each association kind's target (models/services/interfaces span the project AND
+// referenced projects). Abstract classes are admitted — a base class or a polymorphic container element is often
+// abstract. A CrossReference must target an interface; a ServiceRef a service or interface.
+const ASSOC_FILTER: Record<string, { filter: number; abstract: boolean }> = {
+  Inheritance: { filter: TF.Models | TF.Interfaces | TF.Services, abstract: true },
+  Containment: { filter: TF.Models | TF.Interfaces, abstract: true },
+  Reference: { filter: TF.Models | TF.Interfaces, abstract: true },
+  CrossReference: { filter: TF.Interfaces, abstract: true },
+  ServiceDep: { filter: TF.Services | TF.Interfaces, abstract: true },
 }
 
 // Builds the focus graph: the selected type as an editable class box at the origin, its resolvable
@@ -1088,7 +1283,7 @@ function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: 
       id: 'stub:' + side,
       type: 'addStub',
       position: placeSide(side, bySide[side].length, count),
-      data: { side, kinds: KINDS_OF_SIDE[side], allTypes: h.allTypes, selKey, onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
+      data: { side, kinds: KINDS_OF_SIDE[side], onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
     })
     edges.push({
       id: 'stub-e:' + side,
@@ -1981,6 +2176,7 @@ export default function App() {
   const [redo, setRedo] = useState<JournalEvent[]>([])
   const [rev, setRev] = useState(0) // bumps on every working-IR change; re-keys the canvas so the box re-renders
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [finding, setFinding] = useState(false) // the type navigator (a filter-All Type Selector) is open
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [genMsg, setGenMsg] = useState('')
@@ -2480,6 +2676,8 @@ export default function App() {
   useEffect(() => {
     const c = new signalR.HubConnectionBuilder().withUrl('/hub').build()
     conn.current = c
+    // The Type Selector queries the backend catalog through this singleton (path is refreshed as projects open).
+    typeCatalog.query = (q) => c.invoke<TypeQueryResult>('QueryTypes', typeCatalog.path, q)
     c.start()
       .then(() => setConnected(true))
       .catch((e) => setError('connect: ' + e))
@@ -2493,6 +2691,11 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Point the Type Selector's queries at the open project (the backend caches its catalog under this path).
+  useEffect(() => {
+    if (baseline) typeCatalog.path = baseline.path
+  }, [baseline])
 
   // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo — but never while a text field is focused, so
   // in-form text undo stays native.
@@ -2522,7 +2725,6 @@ export default function App() {
         onAdd,
         onUpdate,
         onDelete,
-        allTypes: working?.types ?? [],
         onAddAssoc,
         onRenameAssoc,
         onDeleteAssoc,
@@ -2608,10 +2810,26 @@ export default function App() {
                 <span>
                   {working.name} — {working.types.length} types
                 </span>
+                <button className="find-type-top" title="Find a type" onClick={() => setFinding(true)}>
+                  ⌕
+                </button>
                 <button className="new-type-top" title="New top-level type" onClick={() => setNewTypeNs('')}>
                   + type
                 </button>
               </div>
+              {finding && (
+                <TypeSelector
+                  filter={TF_ALL}
+                  includeAbstract
+                  title="Find a type"
+                  value={selectedKey}
+                  onPick={(fqn) => {
+                    setFinding(false)
+                    if (working.types.some((t) => key(t) === fqn)) setSelectedKey(fqn)
+                  }}
+                  onClose={() => setFinding(false)}
+                />
+              )}
               {[...root.children.values()]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((c) => (
