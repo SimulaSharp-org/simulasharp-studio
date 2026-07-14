@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ReactFlow,
   Background,
@@ -17,7 +18,8 @@ import {
 import * as signalR from '@microsoft/signalr'
 import '@xyflow/react/dist/style.css'
 
-type MemberRow = { name: string; type: string | null; facets: string[]; params?: string | null }
+type ParamDto = { name: string; type: string }
+type MemberRow = { name: string; type: string | null; facets: string[]; params?: ParamDto[] | null }
 type Association = { kind: string; name: string; target: string }
 type DesignableType = {
   namespace: string
@@ -28,9 +30,44 @@ type DesignableType = {
 }
 type ProjectModel = { name: string; path: string; types: DesignableType[] }
 
+// ── Type catalog / Type Selector (backend-served, searched per query) ────────────
+type TypeRefDto = {
+  name: string
+  fqn: string
+  namespace: string
+  category: string
+  volatile: boolean
+  marshalable: boolean
+  bcl: boolean
+  abstract: boolean
+}
+type TypeQueryReq = { filter: number; includeBcl: boolean; includeAbstractClasses: boolean; query: string }
+type TypeQueryResult = { total: number; items: TypeRefDto[] }
+
+// The TypeFilter [Flags] enum, mirrored from the backend (OR-able; ALL = every bit).
+const TF = { Volatile: 1, Marshalable: 2, Models: 4, Interfaces: 8, Services: 16 } as const
+const TF_ALL = TF.Volatile | TF.Marshalable | TF.Models | TF.Interfaces | TF.Services
+
+// The picker queries the backend through this singleton (set once the connection + project path are known), so the
+// deeply-nested consumers (member forms, association stubs — rendered inside React Flow nodes) don't need it threaded.
+const typeCatalog: { path: string; query: ((q: TypeQueryReq) => Promise<TypeQueryResult>) | null } = { path: '', query: null }
+
+// Canonical fqns (as stored on member/param types) → a short display label: a C# alias for primitives, else the
+// simple name. Used to render a picked type compactly.
+const PRIM_ALIAS: Record<string, string> = {
+  'System.Int32': 'int', 'System.UInt32': 'uint', 'System.Int64': 'long', 'System.UInt64': 'ulong',
+  'System.Int16': 'short', 'System.UInt16': 'ushort', 'System.Byte': 'byte', 'System.SByte': 'sbyte',
+  'System.Double': 'double', 'System.Single': 'float', 'System.Decimal': 'decimal',
+  'System.Boolean': 'bool', 'System.Char': 'char', 'System.String': 'string', 'System.Object': 'object', 'System.Void': 'void',
+}
+const displayType = (fqn: string | null | undefined): string =>
+  !fqn ? '' : (PRIM_ALIAS[fqn] ?? (fqn.includes('.') ? fqn.slice(fqn.lastIndexOf('.') + 1) : fqn))
+
 // ── Assembly topology (read-only for now) ───────────────────────────────────────
 type DepBinding = { member: string; service: string }
-type ReferenceBinding = { name: string; targets: string[] }
+// isCross tags the binding's kind so write-back files it under the right YAML block: false → intra-site [Reference<T>]
+// (Refs:), true → cross-site [CrossReference<T>] (CRefs:). Defaults to false when omitted (legacy single-kind actions).
+type ReferenceBinding = { name: string; targets: string[]; isCross?: boolean }
 type Container = { name: string; children: ModelInstance[] }
 type ModelInstance = { name: string; type: string; config: Record<string, string>; containers: Container[]; refs: ReferenceBinding[]; deps: DepBinding[] }
 type ServiceInstance = { name: string; type: string; config: Record<string, string>; deps: DepBinding[] }
@@ -55,8 +92,9 @@ type TopoAction =
   | { op: 'moveInstance'; asm: string; path: string; toParentPath: string; toContainer: string }
   | { op: 'removeInstance'; asm: string; path: string }
   | { op: 'setInstanceConfig'; asm: string; path: string; key: string; value: string }
-  // reference/dep wiring — `name`/`member` name a [References<T>]/[ServiceRef] field on the instance's type
-  | { op: 'setReference'; asm: string; path: string; name: string; targets: string[] }
+  // reference/dep wiring — `name`/`member` name a [Reference<T>]/[CrossReference<T>]/[ServiceRef] field on the
+  // instance's type. `isCross` files the binding under Refs: (false) vs CRefs: (true).
+  | { op: 'setReference'; asm: string; path: string; name: string; targets: string[]; isCross: boolean }
   | { op: 'setServiceDep'; asm: string; path: string; member: string; service: string }
 
 const mapDeps = (models: ModelInstance[], fn: (d: DepBinding) => DepBinding | null): ModelInstance[] =>
@@ -138,8 +176,8 @@ function applyTopoToAsm(asm: AssemblyModel, a: TopoAction): AssemblyModel {
         const refs = !a.targets.length
           ? m.refs.filter((r) => r.name !== a.name)
           : m.refs.some((r) => r.name === a.name)
-            ? m.refs.map((r) => (r.name === a.name ? { ...r, targets: a.targets } : r))
-            : [...m.refs, { name: a.name, targets: a.targets }]
+            ? m.refs.map((r) => (r.name === a.name ? { ...r, targets: a.targets, isCross: a.isCross } : r))
+            : [...m.refs, { name: a.name, targets: a.targets, isCross: a.isCross }]
         return { ...m, refs }
       }
       return { ...asm, sites: asm.sites.map((s) => ({ ...s, models: mapInstanceAt(s.models, segs, set) })) }
@@ -272,9 +310,11 @@ const key = (t: DesignableType) => (t.namespace ? t.namespace + '.' + t.name : t
 // Association layout: each kind sits on one side of the selected type, and each edge is coloured by kind.
 const SIDES = ['top', 'right', 'bottom', 'left'] as const
 type Side = (typeof SIDES)[number]
+// Both reference kinds — intra-site Reference and cross-site CrossReference — live on the right side.
 const SIDE_OF: Record<string, Side> = {
   Inheritance: 'top',
   Reference: 'right',
+  CrossReference: 'right',
   ServiceDep: 'left',
   Containment: 'bottom',
 }
@@ -288,6 +328,7 @@ const HANDLE_POS: Record<Side, Position> = {
 const EDGE_COLOR: Record<string, string> = {
   Inheritance: '#94a3b8',
   Reference: '#38bdf8',
+  CrossReference: '#f59e0b',   // amber — a cross-site reference, visually distinct from the sky-blue intra Reference
   ServiceDep: '#c084fc',
   Containment: '#34d399',
 }
@@ -588,6 +629,115 @@ function NewTypeDialog({ stable, onCreate, onCancel }: { stable: string; onCreat
   )
 }
 
+// ── Type Selector: a modal, searchable, namespace-grouped type picker ─────────────
+// Backed by the backend catalog (queried per keystroke through `typeCatalog`, debounced). `filter` is the OR-ed
+// TypeFilter bitmask for the slot; `includeAbstract` admits abstract classes (e.g. a Contains/Reference target). When
+// the match count exceeds the backend cap the item list comes back empty and we ask the user to narrow the search.
+
+function TypeSelector({
+  filter,
+  includeAbstract = false,
+  title = 'Select a type',
+  value,
+  onPick,
+  onClose,
+}: {
+  filter: number
+  includeAbstract?: boolean
+  title?: string
+  value?: string | null
+  onPick: (fqn: string) => void
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [includeBcl, setIncludeBcl] = useState(false)
+  const [result, setResult] = useState<TypeQueryResult | null>(null)
+  const seq = useRef(0)
+
+  // Debounced query on mount + whenever the search / BCL toggle change; a sequence id drops out-of-order responses.
+  useEffect(() => {
+    const q = typeCatalog.query
+    if (!q) {
+      setResult({ total: 0, items: [] })
+      return
+    }
+    const id = ++seq.current
+    const handle = setTimeout(() => {
+      q({ filter, includeBcl, includeAbstractClasses: includeAbstract, query: query.trim() })
+        .then((r) => id === seq.current && setResult(r))
+        .catch(() => id === seq.current && setResult({ total: 0, items: [] }))
+    }, 150)
+    return () => clearTimeout(handle)
+  }, [filter, includeAbstract, includeBcl, query])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Group the (backend-sorted) items by namespace — an auto-expanded tree over the narrowed set.
+  const groups = useMemo(() => {
+    const m = new Map<string, TypeRefDto[]>()
+    for (const it of result?.items ?? []) {
+      const ns = it.namespace || '(global)'
+      const arr = m.get(ns)
+      if (arr) arr.push(it)
+      else m.set(ns, [it])
+    }
+    return [...m.entries()]
+  }, [result])
+
+  const overflow = (result?.total ?? 0) > 0 && (result?.items.length ?? 0) === 0
+
+  return createPortal(
+    <div className="tsel-overlay" onClick={onClose}>
+      <div className="tsel" onClick={(e) => e.stopPropagation()}>
+        <div className="tsel-head">
+          <span className="tsel-title">{title}</span>
+          <button className="tsel-close" onClick={onClose} title="close (Esc)">
+            ×
+          </button>
+        </div>
+        <div className="tsel-controls">
+          <input className="tsel-search" autoFocus placeholder="search a type…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <label className="tsel-bcl" title="include .NET framework (System.*/Microsoft.*) types">
+            <input type="checkbox" checked={includeBcl} onChange={(e) => setIncludeBcl(e.target.checked)} /> BCL
+          </label>
+        </div>
+        <div className="tsel-body">
+          {result === null ? (
+            <div className="tsel-msg">searching…</div>
+          ) : overflow ? (
+            <div className="tsel-msg">{result.total} matches — search a type to narrow down the results</div>
+          ) : result.items.length === 0 ? (
+            <div className="tsel-msg">no matching types</div>
+          ) : (
+            groups.map(([ns, items]) => (
+              <div key={ns} className="tsel-group">
+                <div className="tsel-ns">{ns}</div>
+                {items.map((it) => (
+                  <button key={it.fqn} className={'tsel-item' + (it.fqn === value ? ' sel' : '')} title={it.fqn} onClick={() => onPick(it.fqn)}>
+                    <span className={'tsel-cat c-' + it.category}>{it.category[0]}</span>
+                    <span className="tsel-name">{it.name}</span>
+                    {it.abstract && <span className="tsel-tag">abstract</span>}
+                  </button>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 // ── The member mini-form ─────────────────────────────────────────────────────────
 // Shared by add (initial null) and edit (initial = the member). Governs name, type and the member's
 // attribute set. At least one attribute is required — Save stays disabled until name and ≥1 attribute
@@ -605,15 +755,30 @@ function MemberForm({
   onCancel: () => void
 }) {
   const [name, setName] = useState(initial?.name ?? '')
-  const [type, setType] = useState(initial?.type ?? '')
-  const [params, setParams] = useState(initial?.params ?? '')
+  const [type, setType] = useState<string>(initial?.type ?? '')
+  const [params, setParams] = useState<ParamDto[]>(initial?.params ?? [])
   const [facets, setFacets] = useState<string[]>(initial?.facets ?? [])
+  // Which type slot (if any) has the Type Selector open: the member's own type, or a parameter by index.
+  const [picking, setPicking] = useState<null | { slot: 'type' } | { slot: 'param'; i: number }>(null)
 
   const catalog = FACETS_BY_KIND[kind] ?? []
   const single = kind === 'Interface' // a member is a Property XOR a Method
   const addable = catalog.filter((f) => !facets.includes(f))
   const isMethod = facets.includes('Method') || facets.includes('ServiceRequest') // takes a signature, not just a type
+  const isEvent = facets.includes('ServiceEvent')
+  const isRequest = facets.includes('ServiceRequest')
+  const optionalType = isMethod || isEvent // a method may return void; an event context is optional
   const valid = name.trim().length > 0 && facets.length > 0
+
+  // The member's own type slot is constrained by what it carries: a knob/plottable is a volatile gauge value; a
+  // parameter or a service payload/return is a marshalable value; an interface property or a method return is anything.
+  const typeFilter =
+    facets.includes('Knob') || facets.includes('Plottable') ? TF.Volatile :
+    facets.includes('Parameter') || isEvent || isRequest ? TF.Marshalable :
+    TF_ALL
+  // Interface-method parameters accept any type; a service request's single context is marshalable.
+  const paramFilter = isRequest ? TF.Marshalable : TF_ALL
+  const canAddParam = !isRequest || params.length < 1 // a request carries at most one context
 
   const commit = () =>
     valid &&
@@ -621,7 +786,7 @@ function MemberForm({
       name: name.trim(),
       type: type.trim() || null,
       facets,
-      params: isMethod ? params.trim() || null : null,
+      params: isMethod ? params.filter((p) => p.name.trim()) : null,
     })
 
   return (
@@ -635,21 +800,51 @@ function MemberForm({
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && commit()}
         />
-        <input
-          className="mf-type"
-          placeholder={isMethod ? 'returns' : 'type'}
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && commit()}
-        />
+        <button className="mf-typeslot" title={type || undefined} onClick={() => setPicking({ slot: 'type' })}>
+          {type ? displayType(type) : isMethod ? 'returns…' : 'type…'}
+        </button>
+        {optionalType && type && (
+          <button className="mf-typeclear" title={isMethod ? 'return void' : 'no context'} onClick={() => setType('')}>
+            ∅
+          </button>
+        )}
       </div>
       {isMethod && (
-        <input
-          className="mf-params"
-          placeholder="parameters, e.g. int slot, double watts"
-          value={params}
-          onChange={(e) => setParams(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && commit()}
+        <div className="mf-params">
+          {params.map((p, i) => (
+            <div key={i} className="mf-param">
+              <input
+                className="mf-param-name"
+                placeholder="name"
+                value={p.name}
+                onChange={(e) => setParams(params.map((q, j) => (j === i ? { ...q, name: e.target.value } : q)))}
+              />
+              <button className="mf-typeslot" title={p.type || undefined} onClick={() => setPicking({ slot: 'param', i })}>
+                {p.type ? displayType(p.type) : 'type…'}
+              </button>
+              <button className="mf-param-del" title="remove parameter" onClick={() => setParams(params.filter((_, j) => j !== i))}>
+                ×
+              </button>
+            </div>
+          ))}
+          {canAddParam && (
+            <button className="mf-param-add" onClick={() => setParams([...params, { name: '', type: '' }])}>
+              + {isRequest ? 'context' : 'param'}
+            </button>
+          )}
+        </div>
+      )}
+      {picking && (
+        <TypeSelector
+          filter={picking.slot === 'type' ? typeFilter : paramFilter}
+          value={picking.slot === 'type' ? type : params[picking.i]?.type ?? null}
+          title={picking.slot === 'type' ? (isMethod ? 'Return type' : 'Type') : 'Parameter type'}
+          onPick={(fqn) => {
+            if (picking.slot === 'type') setType(fqn)
+            else setParams(params.map((q, j) => (j === picking.i ? { ...q, type: fqn } : q)))
+            setPicking(null)
+          }}
+          onClose={() => setPicking(null)}
         />
       )}
       <div className="mf-facets">
@@ -858,24 +1053,30 @@ const edgeTypes = { assoc: AssocEdge }
 
 type AddStubData = {
   side: Side
-  kind: string
-  candidates: DesignableType[] // valid targets for this kind
+  kinds: string[] // the kind(s) this side may create; >1 (right side: Reference/CrossReference) renders a toggle
   onAdd: (assoc: Association) => void
 }
 
 function AddStubNode({ data }: NodeProps) {
   const d = data as unknown as AddStubData
   const [open, setOpen] = useState(false)
+  const [kind, setKind] = useState(d.kinds[0])
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
-  const named = d.kind !== 'Inheritance'
+  const [picking, setPicking] = useState(false)
+  const named = kind !== 'Inheritance'
   const valid = target !== '' && (!named || name.trim().length > 0)
+  // Switching kind changes the acceptable targets (e.g. Reference→CrossReference narrows to interfaces), so re-pick.
+  const pickKind = (k: string) => {
+    setKind(k)
+    setTarget('')
+  }
 
   if (!open)
     return (
       <div className="add-stub">
         <NodeHandles />
-        <button className="add-stub-btn" title={'add ' + d.kind} onClick={() => setOpen(true)}>
+        <button className="add-stub-btn" title={'add ' + d.kinds.join('/')} onClick={() => setOpen(true)}>
           +
         </button>
       </div>
@@ -885,17 +1086,40 @@ function AddStubNode({ data }: NodeProps) {
     <div className="add-stub open">
       <NodeHandles />
       <div className="stub-form" onClick={(e) => e.stopPropagation()}>
-        <div className="stub-kind" style={{ color: EDGE_COLOR[d.kind] }}>
-          {d.kind}
-        </div>
-        <select className="stub-target" value={target} onChange={(e) => setTarget(e.target.value)}>
-          <option value="">target…</option>
-          {d.candidates.map((c) => (
-            <option key={key(c)} value={key(c)}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+        {d.kinds.length > 1 ? (
+          <div className="stub-kind-toggle">
+            {d.kinds.map((k) => (
+              <button
+                key={k}
+                className={'stub-kind-opt' + (k === kind ? ' sel' : '')}
+                style={k === kind ? { color: EDGE_COLOR[k], borderColor: EDGE_COLOR[k] } : undefined}
+                onClick={() => pickKind(k)}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="stub-kind" style={{ color: EDGE_COLOR[kind] }}>
+            {kind}
+          </div>
+        )}
+        <button className="stub-target" title={target || undefined} onClick={() => setPicking(true)}>
+          {target ? displayType(target) : 'target…'}
+        </button>
+        {picking && (
+          <TypeSelector
+            filter={ASSOC_FILTER[kind].filter}
+            includeAbstract={ASSOC_FILTER[kind].abstract}
+            title={kind + ' target'}
+            value={target || null}
+            onPick={(fqn) => {
+              setTarget(fqn)
+              setPicking(false)
+            }}
+            onClose={() => setPicking(false)}
+          />
+        )}
         {named && (
           <input className="stub-name" placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
         )}
@@ -903,7 +1127,7 @@ function AddStubNode({ data }: NodeProps) {
           <button
             className="mf-save"
             disabled={!valid}
-            onClick={() => valid && d.onAdd({ kind: d.kind, name: named ? name.trim() : '', target })}
+            onClick={() => valid && d.onAdd({ kind, name: named ? name.trim() : '', target })}
           >
             Add
           </button>
@@ -952,9 +1176,10 @@ function ClassNode({ data }: NodeProps) {
                 }}
               >
                 {m.name}
-                {(m.facets.includes('Method') || m.facets.includes('ServiceRequest')) && `(${m.params ?? ''})`}
+                {(m.facets.includes('Method') || m.facets.includes('ServiceRequest')) &&
+                  `(${(m.params ?? []).map((p) => `${displayType(p.type)} ${p.name}`).join(', ')})`}
               </span>
-              {m.type && <span className="mtype">{m.type}</span>}
+              {m.type && <span className="mtype">{displayType(m.type)}</span>}
               <button className="mdel" title="delete member" onClick={() => onDelete(m.name)}>
                 ×
               </button>
@@ -1005,19 +1230,20 @@ function ClassNode({ data }: NodeProps) {
 const nodeTypes = { classNode: ClassNode, typeChip: TypeChipNode, addStub: AddStubNode }
 
 type GraphHandlers = Omit<ClassNodeData, 't'> & {
-  allTypes: DesignableType[]
   onAddAssoc: (assoc: Association) => void
   onRenameAssoc: (ref: Association, to: string) => void
   onDeleteAssoc: (ref: Association) => void
 }
 
-/// Valid target types for a new association of the given kind (services/interfaces for a service-dep;
-/// any other type otherwise), excluding the type itself.
-function candidatesFor(kind: string, allTypes: DesignableType[], selKey: string) {
-  const pool = allTypes.filter((t) => key(t) !== selKey)
-  if (kind === 'ServiceDep')
-    return pool.filter((t) => t.kind === 'Service' || t.kind === 'LooselyCoupledService' || t.kind === 'Interface')
-  return pool
+// The Type Selector filter for each association kind's target (models/services/interfaces span the project AND
+// referenced projects). Abstract classes are admitted — a base class or a polymorphic container element is often
+// abstract. A CrossReference must target an interface; a ServiceRef a service or interface.
+const ASSOC_FILTER: Record<string, { filter: number; abstract: boolean }> = {
+  Inheritance: { filter: TF.Models | TF.Interfaces | TF.Services, abstract: true },
+  Containment: { filter: TF.Models | TF.Interfaces, abstract: true },
+  Reference: { filter: TF.Models | TF.Interfaces, abstract: true },
+  CrossReference: { filter: TF.Interfaces, abstract: true },
+  ServiceDep: { filter: TF.Services | TF.Interfaces, abstract: true },
 }
 
 // Builds the focus graph: the selected type as an editable class box at the origin, its resolvable
@@ -1053,12 +1279,11 @@ function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: 
       nodes.push({ id: tk, type: 'typeChip', position: placeSide(side, i, count), data: { t: byKey.get(tk)! } })
     })
     if (!showStub) continue
-    const kind = KIND_OF_SIDE[side]
     nodes.push({
       id: 'stub:' + side,
       type: 'addStub',
       position: placeSide(side, bySide[side].length, count),
-      data: { side, kind, candidates: candidatesFor(kind, h.allTypes, selKey), onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
+      data: { side, kinds: KINDS_OF_SIDE[side], onAdd: h.onAddAssoc } as unknown as Record<string, unknown>,
     })
     edges.push({
       id: 'stub-e:' + side,
@@ -1094,8 +1319,9 @@ function buildGraph(sel: DesignableType, byKey: Map<string, DesignableType>, h: 
   return { nodes, edges }
 }
 
-// Which association kind each side creates.
-const KIND_OF_SIDE: Record<Side, string> = { top: 'Inheritance', right: 'Reference', left: 'ServiceDep', bottom: 'Containment' }
+// Which association kind(s) each side creates. The right side offers a choice — an intra-site Reference or a
+// cross-site CrossReference — so its add-stub renders a toggle; the other sides have a single kind.
+const KINDS_OF_SIDE: Record<Side, string[]> = { top: ['Inheritance'], right: ['Reference', 'CrossReference'], left: ['ServiceDep'], bottom: ['Containment'] }
 
 // Which associations a type may *own*, so add-stubs only appear where they're legal:
 //   containment / references are model-only decorators; a [ServiceRef] lives on a model or a service;
@@ -1427,23 +1653,26 @@ function SiteView({ asm, site, ctx, rev, onBack }: { asm: AssemblyModel; site: S
   )
 }
 
-// ── References view (edit-references button): wire [References<T>] / [ServiceRef] across the whole assembly ──────────
+// ── References view (edit-references button): wire [Reference<T>] / [CrossReference<T>] / [ServiceRef] across the whole assembly ──
 
-type RefField = { name: string; target: string }
+// A wirable reference field. `isCross` is the field's design kind — false for an intra-site [Reference<T>], true for a
+// cross-site [CrossReference<T>] — so wiring can file the binding under the right YAML block.
+type RefField = { name: string; target: string; isCross: boolean }
 // The data helpers the references view needs (supplied by the app); RefsView adds the view-local onWire below.
 type RefsData = {
   refFieldsOf: (type: string) => RefField[]
   serviceRefsOf: (type: string) => { member: string; target: string }[]
   assignable: (type: string, T: string) => boolean // is an instance/service of `type` assignable to reference target `T`
   services: { name: string; type: string }[] // the assembly's service instances (for the [ServiceRef] dropdown)
-  onSetReference: (asm: string, path: string, name: string, targets: string[]) => void
+  onSetReference: (asm: string, path: string, name: string, targets: string[], isCross: boolean) => void
   onSetServiceDep: (asm: string, path: string, member: string, service: string) => void
 }
-type RefsCtx = RefsData & { asmPath: string; onWire: (path: string, name: string, target: string) => void }
+type RefsCtx = RefsData & { asmPath: string; onWire: (path: string, name: string, target: string, isCross: boolean) => void }
 
 const shortName = (fqn: string) => (fqn.includes('.') ? fqn.slice(fqn.lastIndexOf('.') + 1) : fqn)
 
-// A node in the references forest. Enlarged (and not wiring) it lists its type's [References<T>] fields (click → wiring)
+// A node in the references forest. Enlarged (and not wiring) it lists its type's reference fields (both [Reference<T>]
+// and [CrossReference<T>]) (click → wiring)
 // and [ServiceRef] fields (a service dropdown). While wiring, every node is tinted lit/wirable/disabled instead.
 function RefNode({ data }: NodeProps) {
   const d = data as {
@@ -1472,7 +1701,12 @@ function RefNode({ data }: NodeProps) {
           {refFields.map((f) => {
             const n = inst.refs.find((r) => r.name === f.name)?.targets.length ?? 0
             return (
-              <button key={'ref:' + f.name} className="ref-field" onClick={() => ctx.onWire(d.path, f.name, f.target)}>
+              <button
+                key={'ref:' + f.name}
+                className={'ref-field' + (f.isCross ? ' cross' : '')}
+                title={f.isCross ? 'cross-site [CrossReference]' : 'intra-site [Reference]'}
+                onClick={() => ctx.onWire(d.path, f.name, f.target, f.isCross)}
+              >
                 <span className="ref-field-name">{f.name}</span>
                 <span className="ref-field-t">→ {shortName(f.target)}{n ? ` · ${n}` : ''}</span>
               </button>
@@ -1509,7 +1743,7 @@ const refsNodeTypes = { refnode: RefNode }
 function buildRefsGraph(
   asm: AssemblyModel,
   enlarged: string | null,
-  wiring: { path: string; name: string; target: string } | null,
+  wiring: { path: string; name: string; target: string; isCross: boolean } | null,
   wiringTargets: string[],
   ctx: RefsCtx,
 ): { nodes: Node[]; edges: Edge[] } {
@@ -1545,7 +1779,7 @@ function buildRefsGraph(
 
 function RefsView({ asm, data, rev, onBack }: { asm: AssemblyModel; data: RefsData; rev: number; onBack: () => void }) {
   const [enlarged, setEnlarged] = useState<string | null>(null)
-  const [wiring, setWiring] = useState<{ path: string; name: string; target: string } | null>(null)
+  const [wiring, setWiring] = useState<{ path: string; name: string; target: string; isCross: boolean } | null>(null)
 
   const findByPath = (path: string): ModelInstance | null => {
     const segs = pathSegs(path, asm.name)
@@ -1569,10 +1803,10 @@ function RefsView({ asm, data, rev, onBack }: { asm: AssemblyModel; data: RefsDa
     return () => window.removeEventListener('keydown', onKey)
   }, [wiring, enlarged, onBack])
 
-  const ctx: RefsCtx = { ...data, asmPath: asm.path, onWire: (path, name, target) => setWiring({ path, name, target }) }
+  const ctx: RefsCtx = { ...data, asmPath: asm.path, onWire: (path, name, target, isCross) => setWiring({ path, name, target, isCross }) }
   const { nodes, edges } = buildRefsGraph(asm, enlarged, wiring, wiringTargets, ctx)
 
-  const setTargets = (targets: string[]) => wiring && data.onSetReference(asm.path, wiring.path, wiring.name, targets)
+  const setTargets = (targets: string[]) => wiring && data.onSetReference(asm.path, wiring.path, wiring.name, targets, wiring.isCross)
   const reorder = (i: number, dir: -1 | 1) => {
     const arr = [...wiringTargets]
     ;[arr[i], arr[i + dir]] = [arr[i + dir], arr[i]]
@@ -1942,6 +2176,7 @@ export default function App() {
   const [redo, setRedo] = useState<JournalEvent[]>([])
   const [rev, setRev] = useState(0) // bumps on every working-IR change; re-keys the canvas so the box re-renders
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [finding, setFinding] = useState(false) // the type navigator (a filter-All Type Selector) is open
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [genMsg, setGenMsg] = useState('')
@@ -1979,12 +2214,13 @@ export default function App() {
     return m
   }, [working])
 
-  // Each known type → its [References<T>] field names and its [ServiceRef] member names (from the design IR). Used to
-  // prune instance ref/dep bindings whose field no longer exists (else the generator wires a missing reference).
+  // Each known type → its reference field names (both intra [Reference<T>] and cross [CrossReference<T>]) and its
+  // [ServiceRef] member names (from the design IR). Used to prune instance ref/dep bindings whose field no longer
+  // exists (else the generator wires a missing reference).
   const typeRefNames = useMemo(() => {
     const m = new Map<string, Set<string>>()
     for (const t of working?.types ?? [])
-      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'Reference').map((a) => a.name)))
+      m.set(key(t), new Set(t.associations.filter((a) => a.kind === 'Reference' || a.kind === 'CrossReference').map((a) => a.name)))
     return m
   }, [working])
   const typeDepMembers = useMemo(() => {
@@ -2103,7 +2339,7 @@ export default function App() {
       if (!valid) return config // not a known project type — can't validate, leave as-is
       return Object.fromEntries(Object.entries(config).filter(([k]) => valid.includes(k)))
     }
-    // Drop ref/dep bindings whose [References<T>]/[ServiceRef] field was removed in Design (mirrors the Config prune).
+    // Drop ref/dep bindings whose [Reference<T>]/[CrossReference<T>]/[ServiceRef] field was removed in Design (mirrors the Config prune).
     const pruneRefs = (refs: ReferenceBinding[], type: string) => {
       const valid = typeRefNames.get(type)
       return valid ? refs.filter((r) => valid.has(r.name)) : refs
@@ -2170,14 +2406,17 @@ export default function App() {
   const onSetInstanceConfig = (asm: string, path: string, key: string, value: string) =>
     dispatch({ op: 'setInstanceConfig', asm, path, key, value })
 
-  // References view helpers: a type's [References<T>] / [ServiceRef] fields, and one-level assignability to a target T.
+  // References view helpers: a type's reference fields (intra [Reference<T>] tagged isCross:false, cross
+  // [CrossReference<T>] tagged isCross:true) / [ServiceRef] fields, and one-level assignability to a target T.
   const refFieldsOf = (fqType: string) =>
-    working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'Reference').map((a) => ({ name: a.name, target: a.target })) ?? []
+    working?.types.find((t) => key(t) === fqType)?.associations
+      .filter((a) => a.kind === 'Reference' || a.kind === 'CrossReference')
+      .map((a) => ({ name: a.name, target: a.target, isCross: a.kind === 'CrossReference' })) ?? []
   const serviceRefsOf = (fqType: string) =>
     working?.types.find((t) => key(t) === fqType)?.associations.filter((a) => a.kind === 'ServiceDep').map((a) => ({ member: a.name, target: a.target })) ?? []
   const assignable = (type: string, target: string) =>
     type === target || !!working?.types.find((t) => key(t) === type)?.associations.some((a) => a.kind === 'Inheritance' && a.target === target)
-  const onSetReference = (asm: string, path: string, name: string, targets: string[]) => dispatch({ op: 'setReference', asm, path, name, targets })
+  const onSetReference = (asm: string, path: string, name: string, targets: string[], isCross: boolean) => dispatch({ op: 'setReference', asm, path, name, targets, isCross })
   const onSetServiceDep = (asm: string, path: string, member: string, service: string) => dispatch({ op: 'setServiceDep', asm, path, member, service })
   const refsData: RefsData = { refFieldsOf, serviceRefsOf, assignable, services: drilledRefs?.services ?? [], onSetReference, onSetServiceDep }
 
@@ -2437,6 +2676,8 @@ export default function App() {
   useEffect(() => {
     const c = new signalR.HubConnectionBuilder().withUrl('/hub').build()
     conn.current = c
+    // The Type Selector queries the backend catalog through this singleton (path is refreshed as projects open).
+    typeCatalog.query = (q) => c.invoke<TypeQueryResult>('QueryTypes', typeCatalog.path, q)
     c.start()
       .then(() => setConnected(true))
       .catch((e) => setError('connect: ' + e))
@@ -2450,6 +2691,11 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Point the Type Selector's queries at the open project (the backend caches its catalog under this path).
+  useEffect(() => {
+    if (baseline) typeCatalog.path = baseline.path
+  }, [baseline])
 
   // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl+Y redo — but never while a text field is focused, so
   // in-form text undo stays native.
@@ -2479,7 +2725,6 @@ export default function App() {
         onAdd,
         onUpdate,
         onDelete,
-        allTypes: working?.types ?? [],
         onAddAssoc,
         onRenameAssoc,
         onDeleteAssoc,
@@ -2565,10 +2810,26 @@ export default function App() {
                 <span>
                   {working.name} — {working.types.length} types
                 </span>
+                <button className="find-type-top" title="Find a type" onClick={() => setFinding(true)}>
+                  ⌕
+                </button>
                 <button className="new-type-top" title="New top-level type" onClick={() => setNewTypeNs('')}>
                   + type
                 </button>
               </div>
+              {finding && (
+                <TypeSelector
+                  filter={TF_ALL}
+                  includeAbstract
+                  title="Find a type"
+                  value={selectedKey}
+                  onPick={(fqn) => {
+                    setFinding(false)
+                    if (working.types.some((t) => key(t) === fqn)) setSelectedKey(fqn)
+                  }}
+                  onClose={() => setFinding(false)}
+                />
+              )}
               {[...root.children.values()]
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map((c) => (

@@ -77,13 +77,36 @@ internal static class Program
 /// snapshot/undo push) as the backend grows.</summary>
 internal sealed class StudioHub : Hub
 {
+    // The Type Selector's catalog, cached per project so per-keystroke QueryTypes never re-opens Roslyn. Built at
+    // OpenProject (riding that MSBuild open) and rebuilt at Generate; keyed by the normalized project path.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IReadOnlyList<TypeRef>> Catalogs =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private static string CatalogKey(string path) => Path.GetFullPath(path);
+
     public string Ping() => "backend connected";
 
-    /// <summary>Opens an existing project and returns its designable-type IR for the SPA to render.</summary>
-    public Task<ProjectModel> OpenProject(string path) => new ProjectWorkspace().OpenAsync(path);
+    /// <summary>Opens an existing project and returns its designable-type IR for the SPA to render; caches its type catalog.</summary>
+    public async Task<ProjectModel> OpenProject(string path)
+    {
+        var (model, catalog) = await new ProjectWorkspace().OpenWithCatalogAsync(path).ConfigureAwait(false);
+        Catalogs[CatalogKey(path)] = catalog;
+        return model;
+    }
 
     /// <summary>Replays the SPA's pending edit journal back into the project's source; returns the re-derived IR.</summary>
-    public Task<GenerateResult> Generate(string path, EditAction[] actions) => new ProjectGenerator().ApplyAsync(path, actions);
+    public async Task<GenerateResult> Generate(string path, EditAction[] actions)
+    {
+        var (result, catalog) = await new ProjectGenerator().ApplyWithCatalogAsync(path, actions).ConfigureAwait(false);
+        if (catalog is not null) Catalogs[CatalogKey(path)] = catalog;   // refresh only on a successful write
+        return result;
+    }
+
+    /// <summary>Filters the cached type catalog for one Type Selector query (empty result if the project isn't open).</summary>
+    public TypeQueryResult QueryTypes(string path, TypeQuery query) =>
+        Catalogs.TryGetValue(CatalogKey(path), out var catalog)
+            ? TypeCatalog.Query(catalog, query)
+            : new TypeQueryResult(0, []);
 
     /// <summary>Reads the project's *.simassembly.yaml topology files for the topology editor.</summary>
     public Task<IReadOnlyList<AssemblyModel>> OpenAssemblies(string path) => new AssemblyReader().ReadAsync(path);

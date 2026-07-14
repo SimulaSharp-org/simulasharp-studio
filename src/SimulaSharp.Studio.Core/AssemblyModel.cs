@@ -3,8 +3,10 @@ namespace SimulaSharp.Studio.Core;
 /// <summary>Binds a <c>[ServiceRef]</c> member to a service instance by name (a model's or service's <c>Deps</c> entry).</summary>
 public sealed record DepBinding(string Member, string Service);
 
-/// <summary>Populates a <c>[References&lt;T&gt;]</c> reference with target instance paths.</summary>
-public sealed record ReferenceBinding(string Name, IReadOnlyList<string> Targets);
+/// <summary>Populates a reference with target instance paths. <paramref name="IsCross"/> tells the two kinds apart:
+/// <c>false</c> is an intra-site <c>[Reference&lt;T&gt;]</c> (the YAML <c>Refs:</c> block), <c>true</c> a cross-site
+/// <c>[CrossReference&lt;T&gt;]</c> (the YAML <c>CRefs:</c> block).</summary>
+public sealed record ReferenceBinding(string Name, IReadOnlyList<string> Targets, bool IsCross = false);
 
 /// <summary>A <c>[Contains&lt;T&gt;]</c> container and the child model instances placed in it.</summary>
 public sealed record Container(string Name, IReadOnlyList<ModelInstance> Children);

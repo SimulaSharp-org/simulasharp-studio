@@ -121,9 +121,32 @@ public sealed class SourceEditorTests
     {
         var type = Parse("interface I { }");
 
-        var text = SourceEditor.AddMember(type, new MemberDto("Configure", "bool", ["Method"], "int slot, double watts")).ToFullString();
+        var text = SourceEditor.AddMember(type,
+            new MemberDto("Configure", "bool", ["Method"], [new ParamDto("slot", "int"), new ParamDto("watts", "double")])).ToFullString();
 
         Assert.That(text, Does.Contain("bool Configure(int slot, double watts);"));
+    }
+
+    [Test]
+    public void AddMember_synthesises_a_zero_parameter_interface_method()
+    {
+        var type = Parse("interface I { }");
+
+        var text = SourceEditor.AddMember(type, new MemberDto("Tick", null, ["Method"], null)).ToFullString();
+
+        Assert.That(text, Does.Contain("void Tick();"));
+    }
+
+    [Test]
+    public void AddMember_emits_a_canonical_fqn_param_type_for_the_simplifier_to_shorten()
+    {
+        var type = Parse("interface I { }");
+
+        // The picked type is stored fully-qualified; write-back emits it verbatim (annotated), and the ApplyToTypeAsync
+        // ImportAdder+Simplifier pass — exercised end-to-end — reduces it to `TimeSpan` with a using.
+        var text = SourceEditor.AddMember(type, new MemberDto("Wait", null, ["Method"], [new ParamDto("d", "System.TimeSpan")])).ToFullString();
+
+        Assert.That(text, Does.Contain("void Wait(System.TimeSpan d);"));
     }
 
     [Test]
@@ -131,7 +154,8 @@ public sealed class SourceEditorTests
     {
         var type = Parse("interface I { void Go(); }");
 
-        var text = SourceEditor.UpdateMember(type, "Go", new MemberDto("Run", "int", ["Method"], "int n")).ToFullString();
+        var text = SourceEditor.UpdateMember(type, "Go",
+            new MemberDto("Run", "int", ["Method"], [new ParamDto("n", "int")])).ToFullString();
 
         Assert.That(text, Does.Contain("int Run(int n)"));
     }
@@ -169,13 +193,45 @@ public sealed class SourceEditorTests
     }
 
     [Test]
-    public void RenameAssociation_changes_a_decorator_name()
+    public void AddAssociation_reference_adds_an_intra_site_decorator()
     {
-        var type = Parse("[References<IPowerConsumer>(\"Consumers\")] class Eps { }");
+        var type = Parse("class Eps { }");
 
-        var text = SourceEditor.RenameAssociation(type, new AssocDto("Reference", "Consumers", "DemoSim.Power.IPowerConsumer"), "Loads").ToFullString();
+        var text = SourceEditor.AddAssociation(type, new AssocDto("Reference", "Cells", "DemoSim.Power.Battery")).ToFullString();
 
-        Assert.That(text, Does.Contain("[References<IPowerConsumer>(\"Loads\")]"));
+        Assert.That(text, Does.Contain("Reference<").And.Contain("DemoSim.Power.Battery").And.Contain("\"Cells\""));
+        Assert.That(text, Does.Not.Contain("CrossReference"), "an intra Reference must not emit CrossReference");
+    }
+
+    [Test]
+    public void AddAssociation_cross_reference_adds_a_cross_site_decorator()
+    {
+        var type = Parse("class Eps { }");
+
+        var text = SourceEditor.AddAssociation(type, new AssocDto("CrossReference", "Consumers", "DemoSim.Power.IPowerConsumer")).ToFullString();
+
+        Assert.That(text, Does.Contain("CrossReference<").And.Contain("DemoSim.Power.IPowerConsumer").And.Contain("\"Consumers\""));
+    }
+
+    [Test]
+    public void RenameAssociation_changes_an_intra_reference_decorator_name()
+    {
+        var type = Parse("[Reference<Battery>(\"Cells\")] class Eps { }");
+
+        var text = SourceEditor.RenameAssociation(type, new AssocDto("Reference", "Cells", "DemoSim.Power.Battery"), "Packs").ToFullString();
+
+        Assert.That(text, Does.Contain("[Reference<Battery>(\"Packs\")]"));
+        Assert.That(text, Does.Not.Contain("Cells"));
+    }
+
+    [Test]
+    public void RenameAssociation_changes_a_cross_reference_decorator_name()
+    {
+        var type = Parse("[CrossReference<IPowerConsumer>(\"Consumers\")] class Eps { }");
+
+        var text = SourceEditor.RenameAssociation(type, new AssocDto("CrossReference", "Consumers", "DemoSim.Power.IPowerConsumer"), "Loads").ToFullString();
+
+        Assert.That(text, Does.Contain("[CrossReference<IPowerConsumer>(\"Loads\")]"));
         Assert.That(text, Does.Not.Contain("Consumers"));
     }
 
@@ -187,5 +243,15 @@ public sealed class SourceEditorTests
         var text = SourceEditor.RemoveAssociation(type, new AssocDto("Containment", "Batteries", "DemoSim.Power.Battery")).ToFullString();
 
         Assert.That(text, Does.Not.Contain("Contains"));
+    }
+
+    [Test]
+    public void RemoveAssociation_drops_a_cross_reference_decorator()
+    {
+        var type = Parse("[CrossReference<IPowerConsumer>(\"Consumers\")] class Eps { }");
+
+        var text = SourceEditor.RemoveAssociation(type, new AssocDto("CrossReference", "Consumers", "DemoSim.Power.IPowerConsumer")).ToFullString();
+
+        Assert.That(text, Does.Not.Contain("CrossReference"));
     }
 }

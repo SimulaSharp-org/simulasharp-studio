@@ -84,11 +84,13 @@ public static class SourceEditor
     public static TypeDeclarationSyntax AddMember(TypeDeclarationSyntax type, MemberDto dto)
     {
         if (dto.Facets.Contains("ServiceEvent"))
-            return type.AddAttributeLists(ParseAttributeList(ServiceEventAttr(dto)).WithAdditionalAnnotations(Formatter.Annotation));
+            return type.AddAttributeLists(ParseAttributeList(ServiceEventAttr(dto)).WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation));
 
         var member = ParseMemberDeclaration(BuildMemberText(dto))
                      ?? throw new InvalidOperationException($"Could not synthesise member '{dto.Name}'.");
-        return type.AddMembers(member.WithAdditionalAnnotations(Formatter.Annotation));
+        // Simplifier.Annotation so the canonical fully-qualified types emitted in the member (its type, return, and
+        // each parameter) are shortened + import-added by the ApplyToTypeAsync pipeline.
+        return type.AddMembers(member.WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation));
     }
 
     private static string BuildMemberText(MemberDto dto)
@@ -100,10 +102,10 @@ public static class SourceEditor
         {
             string ret = string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type!;
             string body = ret == "void" ? "{ }" : "=> throw new global::System.NotImplementedException();";
-            return $"[ServiceRequest] public {ret} Handle_{dto.Name}({dto.Params}) {body}";
+            return $"[ServiceRequest] public {ret} Handle_{dto.Name}({RenderParams(dto.Params)}) {body}";
         }
         if (f.Contains("Method")) // interface method
-            return $"{(string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type)} {dto.Name}({dto.Params});";
+            return $"{(string.IsNullOrWhiteSpace(dto.Type) ? "void" : dto.Type)} {dto.Name}({RenderParams(dto.Params)});";
         if (f.Contains("Property")) // interface property
             return $"{type} {dto.Name} {{ get; set; }}";
 
@@ -115,6 +117,14 @@ public static class SourceEditor
         string partial = f.Contains("Knob") ? "partial " : ""; // knobs generate a backing part
         return $"{string.Join(" ", attrs)} public {partial}{type} {dto.Name} {{ get; set; }}";
     }
+
+    /// <summary>Renders a structured parameter list to a C# signature fragment (e.g. <c>"int slot, double watts"</c>).
+    /// Types are emitted as their stored (canonical, fully-qualified) identity; the caller's Simplifier pass shortens
+    /// them and adds usings. An empty/missing list yields the empty string.</summary>
+    private static string RenderParams(IReadOnlyList<ParamDto>? ps) =>
+        ps is null || ps.Count == 0
+            ? ""
+            : string.Join(", ", ps.Select(p => $"{(string.IsNullOrWhiteSpace(p.Type) ? "object" : p.Type)} {p.Name}"));
 
     // ── Update ────────────────────────────────────────────────────────────────
 
@@ -134,12 +144,13 @@ public static class SourceEditor
                     .WithVariables(SingletonSeparatedList(fld.Declaration.Variables[0].WithIdentifier(Identifier(dto.Name))))),
             MethodDeclarationSyntax m => m
                 .WithReturnType(TypeOr(dto.Type, m.ReturnType).WithTrailingTrivia(Space))
-                .WithParameterList(dto.Params is null ? m.ParameterList : ParseParameterList($"({dto.Params})"))
+                .WithParameterList(dto.Params is null ? m.ParameterList : ParseParameterList($"({RenderParams(dto.Params)})"))
                 .WithIdentifier(Identifier(HasAttr(m.AttributeLists, "ServiceRequest") ? "Handle_" + dto.Name : dto.Name)),
             _ => throw new NotSupportedException($"Cannot update member kind '{member.Kind()}'."),
         };
 
-        return type.ReplaceNode(member, updated.WithAdditionalAnnotations(Formatter.Annotation));
+        // Simplifier.Annotation shortens the canonical types re-emitted above (retype, new params, knob generic arg).
+        return type.ReplaceNode(member, updated.WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation));
     }
 
     private static PropertyDeclarationSyntax UpdateProperty(PropertyDeclarationSyntax p, MemberDto dto)
@@ -178,10 +189,12 @@ public static class SourceEditor
         _ => throw new NotSupportedException($"No attribute for facet '{facet}'."),
     };
 
+    // The knob kind is chosen by the value type — recognised by C# alias or canonical fqn (member types are stored
+    // fully-qualified). A bool → a tick-box, a string → a text box, anything else (numeric) → the templated NumberKnob.
     private static string KnobAttr(string type, string name) => type switch
     {
-        "bool" => $"[TickBoxKnob(\"{name}\")]",
-        "string" => $"[TextKnob(\"{name}\")]",
+        "bool" or "System.Boolean" => $"[TickBoxKnob(\"{name}\")]",
+        "string" or "System.String" => $"[TextKnob(\"{name}\")]",
         _ => $"[NumberKnob<{type}>(\"{name}\")]",
     };
 
@@ -229,15 +242,17 @@ public static class SourceEditor
 
     // ── Associations ───────────────────────────────────────────────────────────
 
-    /// <summary>Adds an association: a <c>[Contains&lt;T&gt;]</c> / <c>[References&lt;T&gt;]</c> decorator, a
-    /// <c>[ServiceRef]</c> member, or a base-list entry. Targets are written by simple name (a using is added upstream).</summary>
+    /// <summary>Adds an association: a <c>[Contains&lt;T&gt;]</c> / <c>[Reference&lt;T&gt;]</c> /
+    /// <c>[CrossReference&lt;T&gt;]</c> decorator, a <c>[ServiceRef]</c> member, or a base-list entry. Targets are written
+    /// by simple name (a using is added upstream).</summary>
     public static TypeDeclarationSyntax AddAssociation(TypeDeclarationSyntax type, AssocDto a)
     {
         string fqn = "global::" + a.Target; // Simplifier shortens it to the least-qualified unambiguous form
         return a.Kind switch
         {
             "Containment" => type.AddAttributeLists(Decorator("Contains", fqn, a.Name)),
-            "Reference" => type.AddAttributeLists(Decorator("References", fqn, a.Name)),
+            "Reference" => type.AddAttributeLists(Decorator("Reference", fqn, a.Name)),
+            "CrossReference" => type.AddAttributeLists(Decorator("CrossReference", fqn, a.Name)),
             "ServiceDep" => type.AddMembers(ParseMemberDeclaration($"[ServiceRef] public {fqn} {a.Name} {{ get; set; }} = null!;")!
                 .WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation)),
             "Inheritance" => (TypeDeclarationSyntax)type.AddBaseListTypes(
@@ -254,6 +269,7 @@ public static class SourceEditor
         {
             case "Containment":
             case "Reference":
+            case "CrossReference":
                 var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
                            ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
                 var arg = attr.ArgumentList!.Arguments[0];
@@ -274,6 +290,7 @@ public static class SourceEditor
         {
             case "Containment":
             case "Reference":
+            case "CrossReference":
                 var attr = FindDecorator(type, DecoratorName(r.Kind), SimpleName(r.Target), r.Name)
                            ?? throw new InvalidOperationException($"{r.Kind} '{r.Name}' not found on '{type.Identifier.Text}'.");
                 // Drop the whole list if this was its only attribute, else just the one attribute.
@@ -304,7 +321,12 @@ public static class SourceEditor
     private static AttributeListSyntax Decorator(string name, string typeArg, string argName) =>
         ParseAttributeList($"[{name}<{typeArg}>(\"{argName}\")]").WithAdditionalAnnotations(Formatter.Annotation, Simplifier.Annotation);
 
-    private static string DecoratorName(string kind) => kind == "Containment" ? "Contains" : "References";
+    private static string DecoratorName(string kind) => kind switch
+    {
+        "Containment" => "Contains",
+        "CrossReference" => "CrossReference",
+        _ => "Reference",   // intra-site [Reference<T>]
+    };
 
     private static MemberDeclarationSyntax RenameMemberTo(MemberDeclarationSyntax member, string to) => member switch
     {

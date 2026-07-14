@@ -20,7 +20,9 @@ public sealed class ProjectWorkspace
     }
 
     private const string Ns = "SimulaSharp.Kernel.";
-    private static readonly SymbolDisplayFormat TypeFormat = SymbolDisplayFormat.MinimallyQualifiedFormat;
+    // Member / parameter / payload types are stored as the canonical fully-qualified identity (no global::), matching
+    // the type catalog's Fqn so the Type Selector can preselect a member's current type; write-back Simplifier-shortens it.
+    private static readonly SymbolDisplayFormat TypeFormat = TypeCatalog.Fqn;
 
     /// <summary>Opens <paramref name="projectPath"/> and projects its declared types into a <see cref="ProjectModel"/>.</summary>
     public async Task<ProjectModel> OpenAsync(string projectPath, CancellationToken ct = default)
@@ -31,6 +33,18 @@ public sealed class ProjectWorkspace
                           ?? throw new InvalidOperationException($"Could not compile project '{projectPath}'.");
 
         return BuildModel(project.Name, projectPath, compilation);
+    }
+
+    /// <summary>Opens <paramref name="projectPath"/> once and returns both its <see cref="ProjectModel"/> and the
+    /// <see cref="TypeCatalog"/> the hub caches for the Type Selector — so a single MSBuild open feeds both.</summary>
+    public async Task<(ProjectModel Model, IReadOnlyList<TypeRef> Catalog)> OpenWithCatalogAsync(string projectPath, CancellationToken ct = default)
+    {
+        using var workspace = MSBuildWorkspace.Create();
+        var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: ct).ConfigureAwait(false);
+        var compilation = await project.GetCompilationAsync(ct).ConfigureAwait(false)
+                          ?? throw new InvalidOperationException($"Could not compile project '{projectPath}'.");
+
+        return (BuildModel(project.Name, projectPath, compilation), TypeCatalog.Build(compilation));
     }
 
     /// <summary>Projects the designable-type IR from an (already-built) compilation — the shared read path
@@ -53,7 +67,7 @@ public sealed class ProjectWorkspace
 
     // ── Classification ──────────────────────────────────────────────────────────
 
-    private static string Classify(INamedTypeSymbol t, Symbols k)
+    internal static string Classify(INamedTypeSymbol t, Symbols k)
     {
         if (t.TypeKind == TypeKind.Interface) return "Interface";
         if (t.TypeKind != TypeKind.Class) return "Other";
@@ -122,11 +136,12 @@ public sealed class ProjectWorkspace
         return rows;
     }
 
-    /// <summary>The parameter list of a method as source-like text (e.g. <c>"int slot, double watts"</c>), or null if none.</summary>
-    private static string? ParamList(IMethodSymbol method) =>
+    /// <summary>The ordered parameters of a method as structured <see cref="ParamDto"/>s (name + canonical type), or
+    /// null if the method has none.</summary>
+    private static IReadOnlyList<ParamDto>? ParamList(IMethodSymbol method) =>
         method.Parameters.Length == 0
             ? null
-            : string.Join(", ", method.Parameters.Select(p => $"{p.Type.ToDisplayString(TypeFormat)} {p.Name}"));
+            : method.Parameters.Select(p => new ParamDto(p.Name, p.Type.ToDisplayString(TypeFormat))).ToList();
 
     /// <summary>Emits one row for a value member, combining its Parameter / Knob / Plottable roles into facets.</summary>
     private static void AddValueMember(List<MemberRow> rows, ISymbol member, ITypeSymbol type, Symbols k)
@@ -155,13 +170,15 @@ public sealed class ProjectWorkspace
         foreach (var i in t.Interfaces)
             edges.Add(new Association("Inheritance", "", TypeKey(i)));
 
-        // Containment / references: generic class decorators [Contains<T>("Name")] / [References<T>("Name")].
+        // Containment / references: generic class decorators [Contains<T>], [Reference<T>] (intra-site) and
+        // [CrossReference<T>] (cross-site), each named [<Name>].
         foreach (var attr in t.GetAttributes())
         {
             var def = attr.AttributeClass?.OriginalDefinition;
             string? kind =
                 Eq(def, k.Contains) ? "Containment" :
-                Eq(def, k.References) ? "Reference" : null;
+                Eq(def, k.Reference) ? "Reference" :
+                Eq(def, k.CrossReference) ? "CrossReference" : null;
             if (kind is null || attr.AttributeClass!.TypeArguments.Length < 1) continue;
             string name = attr.ConstructorArguments.Length >= 1 ? attr.ConstructorArguments[0].Value as string ?? "" : "";
             edges.Add(new Association(kind, name, TypeKey(attr.AttributeClass.TypeArguments[0])));
@@ -189,7 +206,7 @@ public sealed class ProjectWorkspace
 
     // ── Symbol helpers ──────────────────────────────────────────────────────────
 
-    private static bool IsUserDeclared(INamedTypeSymbol t) =>
+    internal static bool IsUserDeclared(INamedTypeSymbol t) =>
         t.DeclaringSyntaxReferences.Any(r =>
             !r.SyntaxTree.FilePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase));
 
@@ -216,7 +233,7 @@ public sealed class ProjectWorkspace
 
     private static bool Eq(ISymbol? a, ISymbol? b) => SymbolEqualityComparer.Default.Equals(a, b);
 
-    private static IEnumerable<INamedTypeSymbol> DeclaredTypes(INamespaceSymbol ns)
+    internal static IEnumerable<INamedTypeSymbol> DeclaredTypes(INamespaceSymbol ns)
     {
         foreach (var t in ns.GetTypeMembers()) yield return t;
         foreach (var child in ns.GetNamespaceMembers())
@@ -225,7 +242,7 @@ public sealed class ProjectWorkspace
     }
 
     /// <summary>The framework attribute/base symbols resolved once from the compilation.</summary>
-    private sealed class Symbols(Compilation c)
+    internal sealed class Symbols(Compilation c)
     {
         public readonly INamedTypeSymbol? IModel = c.GetTypeByMetadataName(Ns + "Model.IModel");
         public readonly INamedTypeSymbol? IService = c.GetTypeByMetadataName(Ns + "Model.IService");
@@ -238,6 +255,7 @@ public sealed class ProjectWorkspace
         public readonly INamedTypeSymbol? ServiceEvent = c.GetTypeByMetadataName(Ns + "Attributes.ServiceEventAttribute");
         public readonly INamedTypeSymbol? ServiceRef = c.GetTypeByMetadataName(Ns + "Attributes.ServiceRefAttribute");
         public readonly INamedTypeSymbol? Contains = c.GetTypeByMetadataName(Ns + "Attributes.ContainsAttribute`1");
-        public readonly INamedTypeSymbol? References = c.GetTypeByMetadataName(Ns + "Attributes.ReferencesAttribute`1");
+        public readonly INamedTypeSymbol? Reference = c.GetTypeByMetadataName(Ns + "Attributes.ReferenceAttribute`1");
+        public readonly INamedTypeSymbol? CrossReference = c.GetTypeByMetadataName(Ns + "Attributes.CrossReferenceAttribute`1");
     }
 }

@@ -30,9 +30,16 @@ public sealed class ProjectGenerator
     }
 
     /// <summary>Applies <paramref name="actions"/> to <paramref name="projectPath"/>, writing changes only if they compile.</summary>
-    public async Task<GenerateResult> ApplyAsync(string projectPath, IReadOnlyList<EditAction> actions, CancellationToken ct = default)
+    public async Task<GenerateResult> ApplyAsync(string projectPath, IReadOnlyList<EditAction> actions, CancellationToken ct = default) =>
+        (await ApplyWithCatalogAsync(projectPath, actions, ct).ConfigureAwait(false)).Result;
+
+    /// <summary>As <see cref="ApplyAsync"/>, but also returns the freshly rebuilt <see cref="TypeCatalog"/> (from the
+    /// post-write compilation) on success — the hub caches it so the Type Selector reflects the new source. The catalog
+    /// is <c>null</c> on failure or a no-op (the cache then keeps its prior value).</summary>
+    public async Task<(GenerateResult Result, IReadOnlyList<TypeRef>? Catalog)> ApplyWithCatalogAsync(
+        string projectPath, IReadOnlyList<EditAction> actions, CancellationToken ct = default)
     {
-        if (actions.Count == 0) return new GenerateResult(true, [], null);
+        if (actions.Count == 0) return (new GenerateResult(true, [], null), null);
 
         try
         {
@@ -75,14 +82,15 @@ public sealed class ProjectGenerator
                 .Where(d => d.Severity == DiagnosticSeverity.Error && !before.Contains(DiagnosticKey(d)))
                 .Select(d => d.ToString())
                 .ToList();
-            if (introduced.Count > 0) return new GenerateResult(false, introduced, null);
+            if (introduced.Count > 0) return (new GenerateResult(false, introduced, null), null);
 
             await CommitAsync(solution, originalSolution, projectId, ct).ConfigureAwait(false);
-            return new GenerateResult(true, [], ProjectWorkspace.BuildModel(editedProject.Name, projectPath, editedCompilation));
+            var model = ProjectWorkspace.BuildModel(editedProject.Name, projectPath, editedCompilation);
+            return (new GenerateResult(true, [], model), TypeCatalog.Build(editedCompilation));
         }
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
         {
-            return new GenerateResult(false, [ex.Message], null);
+            return (new GenerateResult(false, [ex.Message], null), null);
         }
     }
 
