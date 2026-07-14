@@ -1,8 +1,12 @@
 namespace SimulaSharp.Studio.Core;
 
+/// <summary>One parameter of a method-shaped member: its <paramref name="Name"/> and its picked <paramref name="Type"/>
+/// (the canonical fully-qualified identity from the type catalog).</summary>
+public sealed record ParamDto(string Name, string Type);
+
 /// <summary>The value/shape of a member in an edit action (mirrors the SPA's member row). <paramref name="Params"/>
-/// is the parameter list for a method-shaped member (interface method / service-request handler); null otherwise.</summary>
-public sealed record MemberDto(string Name, string? Type, IReadOnlyList<string> Facets, string? Params = null);
+/// is the ordered parameter list for a method-shaped member (interface method / service-request handler); null otherwise.</summary>
+public sealed record MemberDto(string Name, string? Type, IReadOnlyList<string> Facets, IReadOnlyList<ParamDto>? Params = null);
 
 /// <summary>An association in an edit action (mirrors the SPA's association).</summary>
 public sealed record AssocDto(string Kind, string Name, string Target);

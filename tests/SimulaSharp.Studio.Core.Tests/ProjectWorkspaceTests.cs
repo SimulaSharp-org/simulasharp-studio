@@ -42,6 +42,12 @@ public sealed class ProjectWorkspaceTests
             Assert.That(eps?.Kind, Is.EqualTo("Model"));
             Assert.That(ipc?.Kind, Is.EqualTo("Interface"));
             Assert.That(ipc!.Members.Any(m => m.Name == "DrawW" && m.Facets.Contains("Property")), "IPowerConsumer.DrawW property");
+
+            // A method member's parameters read as a structured list, each typed by its canonical fully-qualified name.
+            var setMode = ipc.Members.SingleOrDefault(m => m.Name == "SetMode");
+            Assert.That(setMode?.Params, Is.Not.Null.And.Count.EqualTo(1), "SetMode has one parameter");
+            Assert.That(setMode!.Params![0].Name, Is.EqualTo("mode"));
+            Assert.That(setMode.Params[0].Type, Is.EqualTo("DemoSim.Power.PowerMode"), "the enum param type is canonical fqn");
             Assert.That(vbus, Is.Not.Null, "Eps.Vbus should be a single combined row");
             Assert.That(vbus!.Facets, Does.Contain("Knob").And.Contain("Plottable"), "Eps.Vbus is knob + plottable");
             Assert.That(battery!.Members.Any(m => m.Name == "CapacityWh" && m.Facets.Contains("Parameter")), "Battery.CapacityWh param");

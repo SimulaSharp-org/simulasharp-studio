@@ -19,9 +19,15 @@ public partial class Heater(IClock c, IScheduler s, ILogger l) : ModelBase(c, s,
     // word-size, hence atomically readable.
     private double _budgetW = double.PositiveInfinity;
 
+    // The current regulation mode (defaults to full output); written from any site via the SetMode command.
+    private PowerMode _mode = PowerMode.Full;
+
     /// <inheritdoc/>
-    public double DrawW => System.Math.Min(RatedW, _budgetW);
+    public double DrawW => _mode == PowerMode.Off ? 0 : System.Math.Min(RatedW, _budgetW);
 
     /// <inheritdoc/>
     public void SetBudget(double watts) => _budgetW = watts;
+
+    /// <inheritdoc/>
+    public void SetMode(PowerMode mode) => _mode = mode;
 }

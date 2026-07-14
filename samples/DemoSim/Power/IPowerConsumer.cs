@@ -2,6 +2,18 @@ using SimulaSharp.Kernel.Attributes;
 
 namespace DemoSim.Power;
 
+/// <summary>How a consumer regulates its draw. A project enum — the Studio Type Selector surfaces it (a marshalable
+/// value) for member and parameter slots.</summary>
+public enum PowerMode
+{
+    /// <summary>Drawing nothing.</summary>
+    Off,
+    /// <summary>Capped to a low budget.</summary>
+    Eco,
+    /// <summary>Drawing at the rated maximum.</summary>
+    Full,
+}
+
 /// <summary>A capability a power-drawing device exposes to the EPS. Framework-pure — it does not derive IModel — so it
 /// can be a <see cref="CrossReferenceAttribute{T}"/> target: the EPS references its consumers through this interface and
 /// the generator mints an <c>IPowerConsumerRef</c> that marshals across sites. The two members show the two low-latency
@@ -23,4 +35,9 @@ public interface IPowerConsumer
     /// the consumer to apply it.</summary>
     [Triggerable]
     void SetBudget(double watts);
+
+    /// <summary>Switch the consumer's regulation mode. Fire-and-forget, and — via the <see cref="PowerMode"/> enum —
+    /// an example of a project-enum-typed cross-reference parameter.</summary>
+    [Triggerable]
+    void SetMode(PowerMode mode);
 }

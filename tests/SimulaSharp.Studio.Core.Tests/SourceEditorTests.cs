@@ -121,9 +121,32 @@ public sealed class SourceEditorTests
     {
         var type = Parse("interface I { }");
 
-        var text = SourceEditor.AddMember(type, new MemberDto("Configure", "bool", ["Method"], "int slot, double watts")).ToFullString();
+        var text = SourceEditor.AddMember(type,
+            new MemberDto("Configure", "bool", ["Method"], [new ParamDto("slot", "int"), new ParamDto("watts", "double")])).ToFullString();
 
         Assert.That(text, Does.Contain("bool Configure(int slot, double watts);"));
+    }
+
+    [Test]
+    public void AddMember_synthesises_a_zero_parameter_interface_method()
+    {
+        var type = Parse("interface I { }");
+
+        var text = SourceEditor.AddMember(type, new MemberDto("Tick", null, ["Method"], null)).ToFullString();
+
+        Assert.That(text, Does.Contain("void Tick();"));
+    }
+
+    [Test]
+    public void AddMember_emits_a_canonical_fqn_param_type_for_the_simplifier_to_shorten()
+    {
+        var type = Parse("interface I { }");
+
+        // The picked type is stored fully-qualified; write-back emits it verbatim (annotated), and the ApplyToTypeAsync
+        // ImportAdder+Simplifier pass — exercised end-to-end — reduces it to `TimeSpan` with a using.
+        var text = SourceEditor.AddMember(type, new MemberDto("Wait", null, ["Method"], [new ParamDto("d", "System.TimeSpan")])).ToFullString();
+
+        Assert.That(text, Does.Contain("void Wait(System.TimeSpan d);"));
     }
 
     [Test]
@@ -131,7 +154,8 @@ public sealed class SourceEditorTests
     {
         var type = Parse("interface I { void Go(); }");
 
-        var text = SourceEditor.UpdateMember(type, "Go", new MemberDto("Run", "int", ["Method"], "int n")).ToFullString();
+        var text = SourceEditor.UpdateMember(type, "Go",
+            new MemberDto("Run", "int", ["Method"], [new ParamDto("n", "int")])).ToFullString();
 
         Assert.That(text, Does.Contain("int Run(int n)"));
     }
