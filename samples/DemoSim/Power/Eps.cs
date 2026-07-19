@@ -1,4 +1,5 @@
 using SimulaSharp.Kernel.Attributes;
+using SimulaSharp.Kernel.Events;
 using SimulaSharp.Kernel.Logging;
 using SimulaSharp.Kernel.Model;
 using SimulaSharp.Kernel.Services;
@@ -28,6 +29,13 @@ public partial class Eps(IClock c, IScheduler s, ILogger l) : ModelBase(c, s, l)
     [Plottable("Vbus", Unit = "V")]
     public partial double Vbus { get; set; }
 
+    /// <summary>A global bus-fault broadcast — a scheduler-less <see cref="ISimEventInvocator{T}">event</see> the EPS
+    /// fires (with the failing bus voltage) when demand outstrips the budget. It is ownerless: no service stands behind
+    /// it. Consumers on any site subscribe with an <c>[EventHandler]</c> and shed load; the assembly's <c>Triggers</c>
+    /// block fills this producer handle.</summary>
+    [EventReference]
+    public ISimEventInvocator<double> BusFault { get; set; } = null!;
+
     /// <summary>Divides a total power budget evenly across the referenced consumers, then reports the resulting draw.
     /// Demonstrates the two cross-reference tiers: <c>SetBudget</c> is fired and forgotten on each consumer (a
     /// <see cref="TriggerableAttribute"/> command), while <c>DrawW</c> is sampled straight off it (a
@@ -48,6 +56,10 @@ public partial class Eps(IClock c, IScheduler s, ILogger l) : ModelBase(c, s, l)
             Consumers[i].SetBudget(share); // [Triggerable] → fire-and-forget across the site boundary
             drawW += Consumers[i].DrawW;   // [VolatileAccess] → direct gauge read, no dispatch
         }
+
+        // If demand outstrips the shared budget, broadcast a bus-fault carrying the current voltage. Every subscriber
+        // handles it on its own site — no owning service, no scheduler behind the event.
+        if (drawW > totalW) BusFault.Trigger(Vbus);
 
         _ = poolWh; // (a real EPS would fold the battery pool into the bus model)
         return drawW;

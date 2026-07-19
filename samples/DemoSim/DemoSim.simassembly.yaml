@@ -3,6 +3,9 @@ Simulator:
   Services:
   - Name: Environment
     Type: DemoSim.Services.Environment
+  Events:                         # global, scheduler-less pub/sub — the EPS fires it, consumers on any site subscribe
+  - Name: BusFault
+    ArgType: System.Double        # payload: the failing bus voltage (stock SimEvent<double>)
   Sites:
   # The Bus site holds the EPS and its batteries. Consumers live on their own Loads site, so the EPS→consumer
   # reference genuinely crosses a site boundary (a CrossReference), while EPS→battery stays same-site (a Reference).
@@ -30,6 +33,8 @@ Simulator:
         - DemoSim.Heater
       Deps:
       - Environment: Environment
+      Triggers:                   # producer: the [EventReference] BusFault handle ← the BusFault event
+      - BusFault: BusFault
   - Name: Loads
     MaxEvents: 64
     Models:
@@ -37,3 +42,5 @@ Simulator:
       Type: DemoSim.Power.Heater
       Config:
         RatedW: 50
+      Subscriptions:              # consumer: the [EventHandler] OnBusFault method ← the BusFault event
+      - OnBusFault: BusFault

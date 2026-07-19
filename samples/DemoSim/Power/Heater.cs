@@ -30,4 +30,10 @@ public partial class Heater(IClock c, IScheduler s, ILogger l) : ModelBase(c, s,
 
     /// <inheritdoc/>
     public void SetMode(PowerMode mode) => _mode = mode;
+
+    /// <summary>Handles the EPS's global <c>BusFault</c> broadcast (wired by the assembly's <c>Subscriptions</c> block):
+    /// on a fault the heater cuts to <see cref="PowerMode.Off"/>. It runs on the heater's own site even though the EPS
+    /// fired the event from another site — the event posted it here.</summary>
+    [EventHandler]
+    public void OnBusFault(double busVoltage) => _mode = PowerMode.Off;
 }
