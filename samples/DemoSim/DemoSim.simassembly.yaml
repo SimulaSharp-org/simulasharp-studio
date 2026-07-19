@@ -3,6 +3,8 @@ Simulator:
   Services:
   - Name: Environment
     Type: DemoSim.Services.Environment
+    Subscriptions:                # a service can subscribe to a global event too (handler runs on its own site)
+    - OnBusFault: BusFault
   Events:                         # global, scheduler-less pub/sub — the EPS fires it, consumers on any site subscribe
   - Name: BusFault
     ArgType: System.Double        # payload: the failing bus voltage (stock SimEvent<double>)
