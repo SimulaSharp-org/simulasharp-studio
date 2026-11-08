@@ -14,7 +14,7 @@ namespace SimulaSharp.Studio.Host;
 /// The SimulaSharp.Studio desktop shell. Hosts the ASP.NET Core backend (Kestrel + SignalR) <b>in-process</b>
 /// on a loopback-only, OS-assigned port, serves the built Vite SPA from <c>wwwroot</c> (same-origin, so the
 /// SPA's relative <c>/hub</c> just works), then opens a Photino native webview on it — one .NET process, no
-/// Node/Chromium. Build the SPA first (<c>cd Studio/web &amp;&amp; npm run build</c>); the Host copies its
+/// Node/Chromium. Build the SPA first (<c>cd web &amp;&amp; npm run build</c>); the Host copies its
 /// <c>dist</c> into <c>wwwroot</c> at build.
 /// </summary>
 internal static class Program

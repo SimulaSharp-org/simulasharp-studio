@@ -15,8 +15,8 @@
     <ProjectReference Include="..\SimulaSharp.Studio.Core\SimulaSharp.Studio.Core.csproj" />
   </ItemGroup>
 
-  <!-- Copy the built Vite SPA (Studio/web/dist) into the Host output's wwwroot so it's served same-origin.
-       Build the web app first: `cd Studio/web && npm run build`. -->
+  <!-- Copy the built Vite SPA (web/dist) into the Host output's wwwroot so it's served same-origin.
+       Build the web app first: `cd web && npm run build`. -->
   <Target Name="CopyStudioWeb" BeforeTargets="Build">
     <ItemGroup>
       <_StudioWeb Include="$(MSBuildProjectDirectory)\..\..\web\dist\**\*.*" />
