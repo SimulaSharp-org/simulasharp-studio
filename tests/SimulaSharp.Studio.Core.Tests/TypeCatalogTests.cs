@@ -15,7 +15,7 @@ public sealed class TypeCatalogTests
         if (!Microsoft.Build.Locator.MSBuildLocator.IsRegistered)
             Microsoft.Build.Locator.MSBuildLocator.RegisterDefaults();
 
-        string csproj = FindUp("Studio", "samples", "DemoSim", "DemoSim.csproj");
+        string csproj = FindUp("samples", "DemoSim", "DemoSim.csproj");
         using var workspace = MSBuildWorkspace.Create();
         var project = await workspace.OpenProjectAsync(csproj);
         var compilation = await project.GetCompilationAsync()

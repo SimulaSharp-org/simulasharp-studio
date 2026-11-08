@@ -7,7 +7,7 @@ public sealed class AssemblyReaderTests
     [Test]
     public async Task Reads_the_DemoSim_assembly_topology()
     {
-        string csproj = FindUp("Studio", "samples", "DemoSim", "DemoSim.csproj");
+        string csproj = FindUp("samples", "DemoSim", "DemoSim.csproj");
 
         var assemblies = await new AssemblyReader().ReadAsync(csproj);
 

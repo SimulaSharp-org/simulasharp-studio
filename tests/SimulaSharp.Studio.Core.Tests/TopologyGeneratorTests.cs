@@ -7,7 +7,7 @@ public sealed class TopologyGeneratorTests
     [Test]
     public async Task Writes_the_topology_back_to_valid_yaml()
     {
-        string csproj = FindUp("Studio", "samples", "DemoSim", "DemoSim.csproj");
+        string csproj = FindUp("samples", "DemoSim", "DemoSim.csproj");
         var assemblies = await new AssemblyReader().ReadAsync(csproj);
         string temp = Path.Combine(Path.GetTempPath(), "studio-topo-" + Guid.NewGuid().ToString("N") + ".simassembly.yaml");
 
