@@ -7,19 +7,17 @@
   <!--
     A small consumer simulation: real user models/services/interface using the current decorators, with the
     generated members supplied by the CodeGen analyzer. Serves as a Studio test fixture (and the thing the
-    editors are grown against). References the framework by ProjectReference so it builds in-repo.
+    editors are grown against). References the framework as the SimulaSharp NuGet package, like any consumer;
+    until it is on nuget.org, a local (uncommitted) nuget.config points restore at a local feed.
   -->
   <ItemGroup>
-    <ProjectReference Include="..\..\..\Kernel\Kernel.csproj" />
-    <ProjectReference Include="..\..\..\CodeGen\SimulaSharp.CodeGen.csproj"
-                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <PackageReference Include="SimulaSharp" Version="0.5.3" />
   </ItemGroup>
 
-  <!-- SimAssembly items must precede the targets import so @(SimAssembly) is populated when it maps to AdditionalFiles
-       (a NuGet consumer gets the import automatically, after the project body). -->
+  <!-- The package's targets are imported automatically after the project body, so @(SimAssembly) is populated
+       by the time they map it to AdditionalFiles. -->
   <ItemGroup>
     <SimAssembly Include="DemoSim.simassembly.yaml" />
   </ItemGroup>
-  <Import Project="..\..\..\CodeGen\build\SimulaSharp.CodeGen.targets" />
 
 </Project>
